@@ -51,7 +51,10 @@ func TestAnalyze_BasicImage(t *testing.T) {
 	img := createTestImage(800, 600, color.RGBA{128, 128, 128, 255})
 
 	// Analyze the image
-	result := analyzer.Analyze(img, false)
+	result, err := analyzer.Analyze(img)
+	if err != nil {
+		t.Fatalf("Failed to analyze image: %v", err)
+	}
 
 	// Verify basic fields are set
 	if result.Timestamp.IsZero() {
@@ -81,7 +84,10 @@ func TestAnalyze_OCRMode(t *testing.T) {
 	img := createTestImage(1200, 800, color.RGBA{200, 200, 200, 255})
 
 	// Analyze with OCR mode
-	result := analyzer.Analyze(img, true)
+	result, err := analyzer.AnalyzeWithOCR(img, "test text")
+	if err != nil {
+		t.Fatalf("Failed to analyze image with OCR: %v", err)
+	}
 
 	// Verify OCR-specific fields are set
 	if result.Metrics.Resolution == "" {
@@ -105,7 +111,10 @@ func TestAnalyze_LowResolutionImage(t *testing.T) {
 	img := createTestImage(400, 300, color.RGBA{128, 128, 128, 255})
 
 	// Analyze with OCR mode to trigger resolution check
-	result := analyzer.Analyze(img, true)
+	result, err := analyzer.AnalyzeWithOCR(img, "test text")
+	if err != nil {
+		t.Fatalf("Failed to analyze image with OCR: %v", err)
+	}
 
 	// Should detect low resolution
 	if !result.Quality.IsLowResolution {
@@ -123,7 +132,10 @@ func TestAnalyze_BrightImage(t *testing.T) {
 	img := createTestImage(800, 600, color.RGBA{250, 250, 250, 255})
 
 	// Analyze with OCR mode
-	result := analyzer.Analyze(img, true)
+	result, err := analyzer.AnalyzeWithOCR(img, "test text")
+	if err != nil {
+		t.Fatalf("Failed to analyze image with OCR: %v", err)
+	}
 
 	// Should detect brightness issues
 	if !result.Quality.IsTooBright {
@@ -144,7 +156,10 @@ func TestAnalyze_DarkImage(t *testing.T) {
 	img := createTestImage(800, 600, color.RGBA{20, 20, 20, 255})
 
 	// Analyze with OCR mode
-	result := analyzer.Analyze(img, true)
+	result, err := analyzer.AnalyzeWithOCR(img, "test text")
+	if err != nil {
+		t.Fatalf("Failed to analyze image with OCR: %v", err)
+	}
 
 	// Should detect darkness issues
 	if !result.Quality.IsTooDark {
@@ -166,7 +181,10 @@ func TestAnalyzeWithOCR(t *testing.T) {
 	expectedText := "Hello World"
 
 	// Analyze with OCR
-	result := analyzer.AnalyzeWithOCR(img, expectedText)
+	result, err := analyzer.AnalyzeWithOCR(img, expectedText)
+	if err != nil {
+		t.Fatalf("Failed to analyze image with OCR: %v", err)
+	}
 
 	// Verify OCR-specific fields
 	if result.OCRResult == nil {
@@ -191,7 +209,10 @@ func TestAnalyze_Performance(t *testing.T) {
 
 	// Measure analysis time
 	start := time.Now()
-	result := analyzer.Analyze(img, true)
+	result, err := analyzer.AnalyzeWithOCR(img, "performance test")
+	if err != nil {
+		t.Fatalf("Failed to analyze image with OCR: %v", err)
+	}
 	duration := time.Since(start)
 
 	// Analysis should complete within reasonable time (5 seconds)
@@ -231,7 +252,10 @@ func TestAnalyze_OverexposedImage(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			img := createTestImage(tc.width, tc.height, tc.color)
-			result := analyzer.Analyze(img, false)
+			result, err := analyzer.Analyze(img)
+			if err != nil {
+				t.Fatalf("Failed to analyze image: %v", err)
+			}
 
 			// Basic validation
 			if result.Timestamp.IsZero() {

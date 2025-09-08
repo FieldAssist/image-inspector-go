@@ -4,15 +4,15 @@ import "image"
 
 // ImageAnalyzer defines the main interface for image analysis
 type ImageAnalyzer interface {
-	// Legacy methods for backward compatibility
-	Analyze(img image.Image, isOCR bool) AnalysisResult
-	AnalyzeWithOCR(img image.Image, expectedText string) AnalysisResult
+	// Analyze performs the analysis on the provided image.
+	Analyze(img image.Image) (*AnalysisResult, error)
+	// AnalyzeWithOCR performs OCR-specific image analysis (legacy method for backward compatibility).
+	AnalyzeWithOCR(img image.Image, expectedText string) (*AnalysisResult, error)
+	// AnalyzeWithOptions performs image analysis with enhanced parallel processing and memory optimization.
+	AnalyzeWithOptions(img image.Image, options AnalysisOptions) (*AnalysisResult, error)
 
-	// New options-based method
-	AnalyzeWithOptions(img image.Image, options AnalysisOptions) AnalysisResult
-
-	// Lifecycle management
-	Close() error
+	// Cleanup releases resources held by the analyzer (e.g., stops its worker pool).
+	Cleanup() error
 }
 
 // MetricsCalculator handles image metrics computation

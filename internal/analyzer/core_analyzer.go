@@ -69,20 +69,19 @@ func NewCoreAnalyzer() (ImageAnalyzer, error) {
 }
 
 // Analyze performs basic image analysis with memory management
-func (oca *coreAnalyzer) Analyze(img image.Image, isOCR bool) AnalysisResult {
+func (oca *coreAnalyzer) Analyze(img image.Image) (*AnalysisResult, error) {
 	options := DefaultOptions()
-	options.OCRMode = isOCR
 	return oca.AnalyzeWithOptions(img, options)
 }
 
 // AnalyzeWithOCR performs OCR-specific image analysis (legacy method for backward compatibility)
-func (oca *coreAnalyzer) AnalyzeWithOCR(img image.Image, expectedText string) AnalysisResult {
+func (oca *coreAnalyzer) AnalyzeWithOCR(img image.Image, expectedText string) (*AnalysisResult, error) {
 	options := OCROptions().WithOCR(expectedText)
 	return oca.AnalyzeWithOptions(img, options)
 }
 
 // AnalyzeWithOptions performs image analysis with enhanced parallel processing and memory optimization
-func (oca *coreAnalyzer) AnalyzeWithOptions(img image.Image, options AnalysisOptions) AnalysisResult {
+func (oca *coreAnalyzer) AnalyzeWithOptions(img image.Image, options AnalysisOptions) (*AnalysisResult, error) {
 	start := time.Now()
 	defer func() {
 		oca.updatePerformanceStats(time.Since(start))
@@ -120,7 +119,7 @@ func (oca *coreAnalyzer) AnalyzeWithOptions(img image.Image, options AnalysisOpt
 		finalResult.Errors = append(finalResult.Errors, "Failed to allocate grayscale image")
 		// Return result to pool before returning
 		oca.resultPool.Put(result)
-		return finalResult
+		return &finalResult, nil
 	}
 	defer oca.grayPool.Put(gray)
 
@@ -144,7 +143,7 @@ func (oca *coreAnalyzer) AnalyzeWithOptions(img image.Image, options AnalysisOpt
 	
 	// Return result to pool before returning the copy
 	oca.resultPool.Put(result)
-	return finalResult
+	return &finalResult, nil
 }
 
 // getGrayImage retrieves and properly sizes a grayscale image from the pool
@@ -475,10 +474,15 @@ func (oca *coreAnalyzer) parseResolution(resolution string) (int, int) {
 	return width, height
 }
 
-// Close shuts down the analyzer and releases resources
-func (oca *coreAnalyzer) Close() error {
+// Cleanup shuts down the analyzer and releases resources
+func (oca *coreAnalyzer) Cleanup() error {
 	if oca.workerPool != nil {
 		oca.workerPool.Close()
 	}
 	return nil
+}
+
+// Close shuts down the analyzer and releases resources
+func (oca *coreAnalyzer) Close() error {
+	return oca.Cleanup()
 }

@@ -70,10 +70,13 @@ func (s *imageAnalysisService) AnalyzeImageWithOptions(ctx context.Context, imag
 	}
 
 	// Analyze image with options using single analyzer
-	result := s.analyzer.AnalyzeWithOptions(img, options)
+	result, err := s.analyzer.AnalyzeWithOptions(img, options)
+	if err != nil {
+		return nil, apperrors.NewProcessingError("failed to analyze image", err)
+	}
 
 	// Convert to basic response
-	response := s.convertToBasicResponse(imageURL, &result)
+	response := s.convertToBasicResponse(imageURL, result)
 
 	return response, nil
 }
@@ -95,10 +98,13 @@ func (s *imageAnalysisService) AnalyzeImageDetailed(ctx context.Context, request
 	options := s.createDetailedAnalysisOptions(request)
 
 	// Analyze image with same analyzer but detailed options
-	result := s.analyzer.AnalyzeWithOptions(img, options)
+	result, err := s.analyzer.AnalyzeWithOptions(img, options)
+	if err != nil {
+		return nil, apperrors.NewProcessingError("failed to analyze image", err)
+	}
 
 	// Convert to detailed response with full context
-	response := s.convertToDetailedResponse(ctx, request, options, &result, img)
+	response := s.convertToDetailedResponse(ctx, request, options, result, img)
 
 	return response, nil
 }
