@@ -91,7 +91,14 @@ func (oca *coreAnalyzer) AnalyzeWithOptions(img image.Image, options AnalysisOpt
 	// Get result from pool and reset it efficiently
 	result := oca.resultPool.Get().(*AnalysisResult)
 	*result = AnalysisResult{} // Reset the result
-	defer oca.resultPool.Put(result)
+	
+	// Use defer with anonymous function to ensure cleanup even on panic
+	defer func() {
+		if r := recover(); r != nil {
+			oca.resultPool.Put(result)
+			panic(r) // Re-panic after cleanup
+		}
+	}()
 
 	result.Timestamp = start
 
@@ -111,6 +118,8 @@ func (oca *coreAnalyzer) AnalyzeWithOptions(img image.Image, options AnalysisOpt
 	if gray == nil {
 		finalResult := *result
 		finalResult.Errors = append(finalResult.Errors, "Failed to allocate grayscale image")
+		// Return result to pool before returning
+		oca.resultPool.Put(result)
 		return finalResult
 	}
 	defer oca.grayPool.Put(gray)
@@ -132,6 +141,9 @@ func (oca *coreAnalyzer) AnalyzeWithOptions(img image.Image, options AnalysisOpt
 	finalResult := *result
 	// Ensure processing time is copied
 	finalResult.ProcessingTimeSec = processingTime
+	
+	// Return result to pool before returning the copy
+	oca.resultPool.Put(result)
 	return finalResult
 }
 
