@@ -22,7 +22,6 @@ type ImageAnalysis struct {
 
 	// OCR Analysis Report
 	HasOCRReport  bool   `json:"has_ocr_report"`
-	ExtractedText string `json:"extracted_text,omitempty"`
 
 	// QR Code Analysis Report
 	HasQRReport bool     `json:"has_qr_report"`

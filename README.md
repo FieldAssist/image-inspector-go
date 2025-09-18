@@ -83,7 +83,6 @@ curl -X POST http://localhost:8080/analyze \
     "avg_luminance": 0.45,
     "avg_saturation": 0.24,
     "has_ocr_report": true,
-    "extracted_text": "Simulated OCR text from image",
     "has_qr_report": false
 }
 ```
