@@ -1,16 +1,20 @@
-# To learn more about how to use Nix to configure your environment
-# see: https://firebase.google.com/docs/studio/customize-workspace
-{ pkgs, ... }: {
-  # Which nixpkgs channel to use.
+{ pkgs, ... }:
+
+{ # The dev.nix file is the entrypoint of your environment.
+  # It contains all the packages and configurations that you need
+  # for your project.
   channel = "stable-24.05"; # or "unstable"
 
-  # Use https://search.nixos.org/packages to find packages
+  # A list of packages that are needed for your development environment.
   packages = [
-    # pkgs.go
-    # pkgs.python311
-    # pkgs.python311Packages.pip
-    # pkgs.nodejs_20
-    # pkgs.nodePackages.nodemon
+    pkgs.go-outline
+    pkgs.gopkgs
+    pkgs.gopls
+    pkgs.gotools
+    pkgs.go
+    pkgs.tesseract
+    pkgs.pkg-config
+    pkgs.haskellPackages.snap-templates
   ];
 
   # Sets environment variables in the workspace
@@ -19,6 +23,7 @@
     # Search for the extensions you want on https://open-vsx.org/ and use "publisher.id"
     extensions = [
       # "vscodevim.vim"
+      "golang.go"
     ];
 
     # Enable previews

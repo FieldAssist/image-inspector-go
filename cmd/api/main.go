@@ -11,47 +11,36 @@ import (
 
 	"github.com/anime-shed/image-inspector-go/internal/config"
 	"github.com/anime-shed/image-inspector-go/internal/container"
-
-	"github.com/sirupsen/logrus"
 )
 
 func main() {
+	// Setup structured logging
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
 	// Load configuration
 	cfg, err := config.LoadFromEnv()
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		log.Fatalf("failed to load config: %v", err)
 	}
 
-	// Initialize dependency injection container
-	c, err := container.NewContainer(cfg)
+	// Create a new container
+	ctn, err := container.NewContainer(cfg)
 	if err != nil {
-		log.Fatalf("Failed to initialize container: %v", err)
+		log.Fatalf("failed to create container: %v", err)
 	}
+	defer ctn.Close()
 
-	// Setup structured logging
-	logrus.SetFormatter(&logrus.JSONFormatter{})
-	logrus.SetLevel(logrus.InfoLevel)
-
-	// Get HTTP handler from container (already configured with all dependencies)
-	handler := c.Handler()
-
-	// Create HTTP server with configurable timeouts
+	// Create HTTP server
 	server := &http.Server{
-		Addr:         cfg.ServerAddress(),
-		Handler:      handler,
-		ReadTimeout:  cfg.RequestTimeout,
-		WriteTimeout: cfg.RequestTimeout,
+		Addr:    ":8080",
+		Handler: ctn.Handler(),
 	}
 
 	// Start server in a goroutine
 	go func() {
-		logrus.WithFields(logrus.Fields{
-			"address": cfg.ServerAddress(),
-			"timeout": cfg.RequestTimeout,
-		}).Info("Starting HTTP server")
-
+		log.Println("Server starting on :8080")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logrus.WithError(err).Fatal("Failed to start server")
+			log.Fatalf("Failed to start server: %v", err)
 		}
 	}()
 
@@ -60,7 +49,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	logrus.Info("Shutting down server...")
+	log.Println("Shutting down server...")
 
 	// Create a deadline for shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -68,8 +57,8 @@ func main() {
 
 	// Attempt graceful shutdown
 	if err := server.Shutdown(ctx); err != nil {
-		logrus.WithError(err).Fatal("Server forced to shutdown")
+		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 
-	logrus.Info("Server exited")
+	log.Println("Server exited")
 }

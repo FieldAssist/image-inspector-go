@@ -77,7 +77,6 @@ type QualityAnalysis struct {
 	IsTooBright      bool `json:"is_too_bright"`
 	IsSkewed         bool `json:"is_skewed"`
 	HasDocumentEdges bool `json:"has_document_edges"`
-	QRDetected       bool `json:"qr_detected"`
 
 	// Overall quality flags
 	IsValid           bool `json:"is_valid"`
@@ -263,7 +262,7 @@ type ProcessingDetails struct {
 // PerformanceMetrics provides detailed timing information
 type PerformanceMetrics struct {
 	TotalProcessingTime float64            `json:"total_processing_time_ms"`
-	ImageFetchTime      float64            `json:"image_fetch_time_ms"`
+	ImageFetchTime      float64            `json:_"image_fetch_time_ms"`
 	AnalysisTime        float64            `json:"analysis_time_ms"`
 	FeatureTimings      map[string]float64 `json:"feature_timings_ms"`
 	MemoryUsage         int64              `json:"memory_usage_bytes,omitempty"`
@@ -276,7 +275,6 @@ type DetailedAnalysisRequest struct {
 	IncludePerformance bool              `json:"include_performance,omitempty"`
 	IncludeRawMetrics  bool              `json:"include_raw_metrics,omitempty"`
 	CustomThresholds   *CustomThresholds `json:"custom_thresholds,omitempty"`
-	FeatureFlags       map[string]bool   `json:"feature_flags,omitempty"`
 	ExpectedText       string            `json:"expected_text,omitempty"`
 }
 

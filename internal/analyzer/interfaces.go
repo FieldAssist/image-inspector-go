@@ -1,35 +1,27 @@
 package analyzer
 
-import "image"
+import (
+	"context"
+	"image"
 
-// ImageAnalyzer defines the main interface for image analysis
-type ImageAnalyzer interface {
-	// Analyze performs the analysis on the provided image.
-	Analyze(img image.Image) (*AnalysisResult, error)
-	// AnalyzeWithOCR performs OCR-specific image analysis (legacy method for backward compatibility).
-	AnalyzeWithOCR(img image.Image, expectedText string) (*AnalysisResult, error)
-	// AnalyzeWithOptions performs image analysis with enhanced parallel processing and memory optimization.
-	AnalyzeWithOptions(img image.Image, options AnalysisOptions) (*AnalysisResult, error)
+	"github.com/anime-shed/image-inspector-go/pkg/models"
+)
 
-	// Cleanup releases resources held by the analyzer (e.g., stops its worker pool).
-	Cleanup() error
+// Analyzer is the primary, public-facing interface for the analyzer package.
+// It provides a single, clear entry point for all image analysis operations.
+type Analyzer interface {
+	// Analyze performs an analysis of the given image based on the provided
+	// configuration options. It returns a consolidated analysis report.
+	Analyze(ctx context.Context, image image.Image, cfgs ...ReportConfigurator) (*models.ImageAnalysis, error)
+
+	// Close releases any resources held by the analyzer.
+	Close() error
 }
 
-// MetricsCalculator handles image metrics computation
-type MetricsCalculator interface {
-	CalculateBasicMetrics(img image.Image) metrics
-	CalculateLaplacianVariance(gray *image.Gray) float64
-	CalculateBrightness(gray *image.Gray) float64
-	DetectSkew(gray *image.Gray) *float64
-	DetectContours(gray *image.Gray) int
-}
-
-// QRDetector handles QR code detection
-type QRDetector interface {
-	DetectQRCode(img image.Image) bool
-}
-
-// OCRAnalyzer handles OCR-specific analysis
-type OCRAnalyzer interface {
-	PerformOCRAnalysis(img image.Image, expectedText string) AnalysisResult
+// FeatureAnalyzer is an internal interface implemented by specialized, single-purpose analyzers
+// (e.g., for quality, QR codes, or OCR). These are orchestrated by the CoreAnalyzer.
+type FeatureAnalyzer interface {
+	// Analyze performs a specific analysis feature on the image and contributes
+	// its findings to the provided report.
+	Analyze(ctx context.Context, image image.Image, report *models.ImageAnalysis) error
 }

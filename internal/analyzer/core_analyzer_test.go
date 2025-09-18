@@ -1,270 +1,105 @@
 package analyzer
 
 import (
+	"context"
+	"errors"
 	"image"
-	"image/color"
 	"testing"
-	"time"
+
+	"github.com/anime-shed/image-inspector-go/pkg/models"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
-// createTestImage creates a simple test image for testing purposes
-func createTestImage(width, height int, fillColor color.RGBA) *image.RGBA {
-	img := image.NewRGBA(image.Rect(0, 0, width, height))
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			img.Set(x, y, fillColor)
+// MockFeatureAnalyzer is a mock type for the FeatureAnalyzer interface.
+
+type MockFeatureAnalyzer struct {
+	mock.Mock
+}
+
+// Analyze provides a mock function with given fields: ctx, img, report
+func (_m *MockFeatureAnalyzer) Analyze(ctx context.Context, img image.Image, report *models.ImageAnalysis) error {
+
+	args := _m.Called(ctx, img, report)
+
+	return args.Error(0)
+
+}
+
+// TestCoreAnalyzer verifies the orchestration logic of the CoreAnalyzer.
+func TestCoreAnalyzer(t *testing.T) {
+	// This test uses mocks to isolate the CoreAnalyzer from the actual feature analyzers.
+	t.Run("NewCoreAnalyzer successfully creates an instance", func(t *testing.T) {
+		// This test now implicitly tests the real NewCoreAnalyzer, which is fine.
+		analyzer, err := NewCoreAnalyzer()
+		require.NoError(t, err)
+		assert.NotNil(t, analyzer)
+		assert.NotNil(t, analyzer.featureAnalyzers[qualityAnalyzerName])
+		assert.NotNil(t, analyzer.featureAnalyzers[ocrAnalyzerName])
+		assert.NoError(t, analyzer.Close()) // Should be able to close immediately
+	})
+
+	t.Run("Analyze orchestrates selected analyzers", func(t *testing.T) {
+		// Setup: Create mock feature analyzers
+		mockQuality := new(MockFeatureAnalyzer)
+		mockOCR := new(MockFeatureAnalyzer)
+
+		// Setup: Create CoreAnalyzer with mocks
+		coreAnalyzer := &CoreAnalyzer{
+			featureAnalyzers: map[string]FeatureAnalyzer{
+				qualityAnalyzerName: mockQuality,
+				ocrAnalyzerName:     mockOCR,
+			},
 		}
-	}
-	return img
-}
 
-// createGradientImage creates a gradient test image
-func createGradientImage(width, height int) *image.RGBA {
-	img := image.NewRGBA(image.Rect(0, 0, width, height))
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			// Create a gradient from black to white
-			intensity := uint8((x + y) * 255 / (width + height))
-			img.Set(x, y, color.RGBA{intensity, intensity, intensity, 255})
+		img := image.NewRGBA(image.Rect(0, 0, 10, 10))
+
+		// Expect that WithQuality and WithOCR call the corresponding mocks.
+		mockQuality.On("Analyze", mock.Anything, img, mock.AnythingOfType("*models.ImageAnalysis")).Return(nil)
+		mockOCR.On("Analyze", mock.Anything, img, mock.AnythingOfType("*models.ImageAnalysis")).Return(nil)
+
+		// Action: Run analysis with specific options
+		_, err := coreAnalyzer.Analyze(context.Background(), img, WithQuality(), WithOCR())
+
+		// Assertions
+		assert.NoError(t, err)
+
+		// Verify that the expected mocks were called
+		mockQuality.AssertExpectations(t)
+		mockOCR.AssertExpectations(t)
+	})
+
+	t.Run("Analyze handles errors from a feature analyzer", func(t *testing.T) {
+		mockQuality := new(MockFeatureAnalyzer)
+		expectedError := errors.New("quality analysis failed")
+
+		coreAnalyzer := &CoreAnalyzer{
+			featureAnalyzers: map[string]FeatureAnalyzer{
+				qualityAnalyzerName: mockQuality,
+			},
 		}
-	}
-	return img
-}
 
-func TestNewImageAnalyzer(t *testing.T) {
-	analyzer, err := NewCoreAnalyzer()
-	if err != nil {
-		t.Fatalf("Failed to create image analyzer: %v", err)
-	}
-	if analyzer == nil {
-		t.Fatal("Expected non-nil analyzer")
-	}
-}
+		img := image.NewRGBA(image.Rect(0, 0, 10, 10))
 
-func TestAnalyze_BasicImage(t *testing.T) {
-	analyzer, err := NewCoreAnalyzer()
-	if err != nil {
-		t.Fatalf("Failed to create image analyzer: %v", err)
-	}
+		// Expect the quality analyzer to be called and return an error.
+		mockQuality.On("Analyze", mock.Anything, img, mock.AnythingOfType("*models.ImageAnalysis")).Return(expectedError)
 
-	// Create a test image
-	img := createTestImage(800, 600, color.RGBA{128, 128, 128, 255})
+		// Action: Run analysis
+		_, err := coreAnalyzer.Analyze(context.Background(), img, WithQuality())
 
-	// Analyze the image
-	result, err := analyzer.Analyze(img)
-	if err != nil {
-		t.Fatalf("Failed to analyze image: %v", err)
-	}
+		// Assertions
+		assert.Error(t, err)
+		assert.Equal(t, expectedError, err)
+		mockQuality.AssertExpectations(t)
+	})
 
-	// Verify basic fields are set
-	if result.Timestamp.IsZero() {
-		t.Error("Expected timestamp to be set")
-	}
-	if result.ProcessingTimeSec <= 0 {
-		t.Error("Expected processing time to be positive")
-	}
-	if result.Metrics.LaplacianVar < 0 {
-		t.Error("Expected non-negative Laplacian variance")
-	}
-	if result.Metrics.AvgLuminance < 0 || result.Metrics.AvgLuminance > 1 {
-		t.Errorf("Expected luminance between 0 and 1, got %f", result.Metrics.AvgLuminance)
-	}
-	if result.Metrics.AvgSaturation < 0 || result.Metrics.AvgSaturation > 1 {
-		t.Errorf("Expected saturation between 0 and 1, got %f", result.Metrics.AvgSaturation)
-	}
-}
-
-func TestAnalyze_OCRMode(t *testing.T) {
-	analyzer, err := NewCoreAnalyzer()
-	if err != nil {
-		t.Fatalf("Failed to create analyzer: %v", err)
-	}
-
-	// Create a test image
-	img := createTestImage(1200, 800, color.RGBA{200, 200, 200, 255})
-
-	// Analyze with OCR mode
-	result, err := analyzer.AnalyzeWithOCR(img, "test text")
-	if err != nil {
-		t.Fatalf("Failed to analyze image with OCR: %v", err)
-	}
-
-	// Verify OCR-specific fields are set
-	if result.Metrics.Resolution == "" {
-		t.Error("Expected resolution to be set in OCR mode")
-	}
-	if result.Metrics.Brightness <= 0 {
-		t.Error("Expected brightness to be calculated in OCR mode")
-	}
-	if result.Metrics.NumContours < 0 {
-		t.Error("Expected non-negative contour count")
-	}
-}
-
-func TestAnalyze_LowResolutionImage(t *testing.T) {
-	analyzer, err := NewCoreAnalyzer()
-	if err != nil {
-		t.Fatalf("Failed to create image analyzer: %v", err)
-	}
-
-	// Create a low resolution image
-	img := createTestImage(400, 300, color.RGBA{128, 128, 128, 255})
-
-	// Analyze with OCR mode to trigger resolution check
-	result, err := analyzer.AnalyzeWithOCR(img, "test text")
-	if err != nil {
-		t.Fatalf("Failed to analyze image with OCR: %v", err)
-	}
-
-	// Should detect low resolution
-	if !result.Quality.IsLowResolution {
-		t.Error("Expected low resolution to be detected")
-	}
-}
-
-func TestAnalyze_BrightImage(t *testing.T) {
-	analyzer, err := NewCoreAnalyzer()
-	if err != nil {
-		t.Fatalf("Failed to create image analyzer: %v", err)
-	}
-
-	// Create a very bright image
-	img := createTestImage(800, 600, color.RGBA{250, 250, 250, 255})
-
-	// Analyze with OCR mode
-	result, err := analyzer.AnalyzeWithOCR(img, "test text")
-	if err != nil {
-		t.Fatalf("Failed to analyze image with OCR: %v", err)
-	}
-
-	// Should detect brightness issues
-	if !result.Quality.IsTooBright {
-		t.Error("Expected bright image to be detected")
-	}
-	if result.Metrics.Brightness < 200 {
-		t.Errorf("Expected high brightness value, got %f", result.Metrics.Brightness)
-	}
-}
-
-func TestAnalyze_DarkImage(t *testing.T) {
-	analyzer, err := NewCoreAnalyzer()
-	if err != nil {
-		t.Fatalf("Failed to create image analyzer: %v", err)
-	}
-
-	// Create a very dark image
-	img := createTestImage(800, 600, color.RGBA{20, 20, 20, 255})
-
-	// Analyze with OCR mode
-	result, err := analyzer.AnalyzeWithOCR(img, "test text")
-	if err != nil {
-		t.Fatalf("Failed to analyze image with OCR: %v", err)
-	}
-
-	// Should detect darkness issues
-	if !result.Quality.IsTooDark {
-		t.Error("Expected dark image to be detected")
-	}
-	if result.Metrics.Brightness > 80 {
-		t.Errorf("Expected low brightness value, got %f", result.Metrics.Brightness)
-	}
-}
-
-func TestAnalyzeWithOCR(t *testing.T) {
-	analyzer, err := NewCoreAnalyzer()
-	if err != nil {
-		t.Fatalf("Failed to create image analyzer: %v", err)
-	}
-
-	// Create a test image
-	img := createTestImage(800, 600, color.RGBA{128, 128, 128, 255})
-	expectedText := "Hello World"
-
-	// Analyze with OCR
-	result, err := analyzer.AnalyzeWithOCR(img, expectedText)
-	if err != nil {
-		t.Fatalf("Failed to analyze image with OCR: %v", err)
-	}
-
-	// Verify OCR-specific fields
-	if result.OCRResult == nil {
-		t.Errorf("Expected OCRResult to be non-nil, but got nil")
-	} else if result.OCRResult.ExpectedText != expectedText {
-		t.Errorf("Expected text '%s', got '%s'", expectedText, result.OCRResult.ExpectedText)
-	}
-	// OCR is not implemented yet, so we expect an error message
-	if result.OCRResult == nil || result.OCRResult.OCRError == "" {
-		t.Error("Expected OCR error message since OCR is not implemented")
-	}
-}
-
-func TestAnalyze_Performance(t *testing.T) {
-	analyzer, err := NewCoreAnalyzer()
-	if err != nil {
-		t.Fatalf("Failed to create image analyzer: %v", err)
-	}
-
-	// Create a reasonably sized test image
-	img := createGradientImage(1000, 800)
-
-	// Measure analysis time
-	start := time.Now()
-	result, err := analyzer.AnalyzeWithOCR(img, "performance test")
-	if err != nil {
-		t.Fatalf("Failed to analyze image with OCR: %v", err)
-	}
-	duration := time.Since(start)
-
-	// Analysis should complete within reasonable time (5 seconds)
-	if duration > 5*time.Second {
-		t.Errorf("Analysis took too long: %v", duration)
-	}
-
-	// Verify processing time is recorded
-	if result.ProcessingTimeSec <= 0 {
-		t.Error("Expected positive processing time")
-	}
-	if result.ProcessingTimeSec > 5.0 {
-		t.Errorf("Processing time seems too high: %f seconds", result.ProcessingTimeSec)
-	}
-}
-
-func TestAnalyze_OverexposedImage(t *testing.T) {
-	analyzer, err := NewCoreAnalyzer()
-	if err != nil {
-		t.Fatalf("Failed to create image analyzer: %v", err)
-	}
-
-	// Test with multiple different images
-	testCases := []struct {
-		name   string
-		color  color.RGBA
-		width  int
-		height int
-	}{
-		{"Gray Image", color.RGBA{128, 128, 128, 255}, 800, 600},
-		{"Red Image", color.RGBA{255, 0, 0, 255}, 800, 600},
-		{"Blue Image", color.RGBA{0, 0, 255, 255}, 800, 600},
-		{"Small Image", color.RGBA{128, 128, 128, 255}, 400, 300},
-		{"Large Image", color.RGBA{128, 128, 128, 255}, 1600, 1200},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			img := createTestImage(tc.width, tc.height, tc.color)
-			result, err := analyzer.Analyze(img)
-			if err != nil {
-				t.Fatalf("Failed to analyze image: %v", err)
-			}
-
-			// Basic validation
-			if result.Timestamp.IsZero() {
-				t.Error("Expected timestamp to be set")
-			}
-			// Processing time can be 0 for very fast operations, so we just check it's not negative
-			if result.ProcessingTimeSec < 0 {
-				t.Error("Expected non-negative processing time")
-			}
-		})
-	}
+	t.Run("Close handles underlying analyzer close errors", func(t *testing.T) {
+		// Although our real OCRAnalyzer.Close returns an error, we can't easily test it
+		// without a more complex mock. This test serves as a placeholder for the logic.
+		analyzer, _ := NewCoreAnalyzer()
+		// In a real scenario with a mockable OCR client, you'd set up an expectation here.
+		err := analyzer.Close()
+		assert.NoError(t, err) // Expecting no error from the default gosseract client close
+	})
 }

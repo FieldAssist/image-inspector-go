@@ -38,7 +38,6 @@ type Quality struct {
 	IsTooBright      bool     `json:"is_too_bright,omitempty"`
 	IsSkewed         bool     `json:"is_skewed,omitempty"`
 	HasDocumentEdges bool     `json:"has_document_edges,omitempty"`
-	QRDetected       bool     `json:"qr_detected,omitempty"`
 	SkewAngle        *float64 `json:"skew_angle,omitempty"`
 }
 

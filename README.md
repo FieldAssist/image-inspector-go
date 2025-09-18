@@ -126,7 +126,6 @@ This application includes several security features to protect against common vu
     - `overexposure_threshold` (number)
     - `oversaturation_threshold` (number)
     - `luminance_threshold` (number)
-    - `skip_qr_detection` (boolean)
     - `skip_white_balance` (boolean)
     - `skip_contour_detection` (boolean)
     - `skip_edge_detection` (boolean)
@@ -141,7 +140,6 @@ Example:
     "quality_mode": true,
     "ocr_mode": false,
     "blur_threshold": 120.0,
-    "skip_qr_detection": false,
     "use_worker_pool": true
   }
 }

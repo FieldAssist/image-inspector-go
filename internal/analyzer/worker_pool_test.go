@@ -227,13 +227,3 @@ func TestWorkerPool_ConcurrentStatsAccess(t *testing.T) {
 		t.Errorf("Expected %d total jobs, got %d", numJobs, finalStats.TotalJobs)
 	}
 }
-
-// Removed TestWorkerPool_ProcessImages_Concurrency as ProcessImages method doesn't exist
-
-// Removed TestWorkerPool_ProcessImages_DifferentSizes as ProcessImages method doesn't exist
-
-// Removed TestWorkerPool_ProcessImages_StressTest as ProcessImages method doesn't exist
-
-// Removed TestWorkerPool_ProcessImages_RaceCondition as ProcessImages method doesn't exist
-
-// Removed TestWorkerPool_ProcessImages_SingleWorker as ProcessImages method doesn't exist

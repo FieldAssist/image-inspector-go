@@ -6,19 +6,19 @@ import (
 
 	"github.com/anime-shed/image-inspector-go/internal/analyzer"
 	"github.com/anime-shed/image-inspector-go/internal/config"
+	"github.com/anime-shed/image-inspector-go/internal/delivery"
 	"github.com/anime-shed/image-inspector-go/internal/repository"
 	"github.com/anime-shed/image-inspector-go/internal/service"
 	"github.com/anime-shed/image-inspector-go/internal/storage"
-	"github.com/anime-shed/image-inspector-go/internal/transport"
 )
 
 // Container holds all application dependencies using dependency injection
 type Container struct {
 	config          *config.Config
 	imageFetcher    storage.ImageFetcher
-	imageAnalyzer   analyzer.ImageAnalyzer
+	imageAnalyzer   analyzer.Analyzer
 	imageRepository repository.ImageRepository
-	analysisService service.ImageAnalysisService
+	analysisService *service.ImageAnalysisService
 	handler         http.Handler
 }
 
@@ -45,7 +45,7 @@ func NewContainer(cfg *config.Config) (*Container, error) {
 	analysisService := service.NewImageAnalysisService(imageRepository, imageAnalyzer)
 
 	// Create HTTP handler with service
-	handler := transport.NewHandler(analysisService, cfg)
+	handler := delivery.NewHandler(analysisService)
 
 	return &Container{
 		config:          cfg,
@@ -68,7 +68,7 @@ func (c *Container) Config() *config.Config {
 }
 
 // GetAnalysisService returns the analysis service
-func (c *Container) GetAnalysisService() service.ImageAnalysisService {
+func (c *Container) GetAnalysisService() *service.ImageAnalysisService {
 	return c.analysisService
 }
 
