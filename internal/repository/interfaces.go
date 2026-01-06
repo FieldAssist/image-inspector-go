@@ -12,6 +12,9 @@ type ImageRepository interface {
 	// FetchImage retrieves an image from a URL
 	FetchImage(ctx context.Context, imageURL string) (image.Image, error)
 
+	// FetchImageBytes retrieves raw image bytes from a URL (optimized for zero-copy)
+	FetchImageBytes(ctx context.Context, imageURL string) ([]byte, error)
+
 	// ValidateImageURL validates if the provided URL is acceptable
 	ValidateImageURL(imageURL string) error
 

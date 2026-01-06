@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 
@@ -38,9 +39,20 @@ func NewHandler(analysisService service.ImageAnalysisService, cfg *config.Config
 		logger.WithError(err).Warn("Failed to set trusted proxies")
 	}
 
+	// Bounded Concurrency: Limit concurrent processing to prevent CPU saturation
+	// Use a channel as a semaphore
+	maxConcurrency := runtime.NumCPU()
+	if maxConcurrency < 1 {
+		maxConcurrency = 1
+	}
+	// Allow a small backlog, but strict processing limit
+	// Actually, strict limit is better for "zero-copy" philosophy effectiveness
+	semaphore := make(chan struct{}, maxConcurrency)
+
 	// Add middleware
 	r.Use(
 		requestSizeLimiter(cfg.MaxRequestBodySize),
+		concurrencyLimiter(semaphore),
 		errorHandler(),
 	)
 
@@ -50,6 +62,30 @@ func NewHandler(analysisService service.ImageAnalysisService, cfg *config.Config
 	r.POST("/analyze/options", analyzeImageWithOptions(analysisService, cfg))
 	r.POST("/detailed-analyze", detailedAnalyzeImage(analysisService, cfg))
 	return r
+}
+
+func concurrencyLimiter(sem chan struct{}) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Skip for health check
+		if c.Request.URL.Path == "/health" {
+			c.Next()
+			return
+		}
+
+		// Try to acquire semaphore with short timeout to prevent piling up requests
+		// If system is saturated, fast failure is better than long tail latency
+		select {
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
+			c.Next()
+		case <-time.After(100 * time.Millisecond): // Fail fast if queue is full
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, ErrorResponse{
+				Error:   "Service Unavailable",
+				Message: "Server is at maximum capacity, please try again later",
+			})
+			return
+		}
+	}
 }
 
 func analyzeImage(analysisService service.ImageAnalysisService, cfg *config.Config) gin.HandlerFunc {

@@ -3,12 +3,12 @@ package analyzer
 import (
 	"fmt"
 	"image"
-	"image/draw"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/anime-shed/image-inspector-go/internal/loader"
 	"github.com/anime-shed/image-inspector-go/pkg/models"
 	"github.com/anime-shed/image-inspector-go/pkg/validation"
 )
@@ -22,11 +22,8 @@ type coreAnalyzer struct {
 	qrDetector        QRDetector
 
 	// Enhanced memory pools with better sizing
-	grayPool      sync.Pool
 	resultPool    sync.Pool
-	bufferPool    sync.Pool
-	tempSlicePool sync.Pool
-
+	
 	// Performance monitoring
 	analysisCount    int64
 	totalProcessTime time.Duration
@@ -45,43 +42,28 @@ func NewCoreAnalyzer() (ImageAnalyzer, error) {
 		qrDetector:        NewQRDetector(),
 
 		// Enhanced memory pools
-		grayPool: sync.Pool{
-			New: func() interface{} {
-				return &image.Gray{}
-			},
-		},
 		resultPool: sync.Pool{
 			New: func() interface{} {
 				return &AnalysisResult{}
-			},
-		},
-		bufferPool: sync.Pool{
-			New: func() interface{} {
-				return make([]byte, 0, 8192) // 8KB buffer
-			},
-		},
-		tempSlicePool: sync.Pool{
-			New: func() interface{} {
-				return make([]float64, 0, 2048) // 2K float64 elements
 			},
 		},
 	}, nil
 }
 
 // Analyze performs basic image analysis with memory management
-func (oca *coreAnalyzer) Analyze(img image.Image) (*AnalysisResult, error) {
+func (oca *coreAnalyzer) Analyze(img *loader.FastImage) (*AnalysisResult, error) {
 	options := DefaultOptions()
 	return oca.AnalyzeWithOptions(img, options)
 }
 
 // AnalyzeWithOCR performs OCR-specific image analysis (legacy method for backward compatibility)
-func (oca *coreAnalyzer) AnalyzeWithOCR(img image.Image, expectedText string) (*AnalysisResult, error) {
+func (oca *coreAnalyzer) AnalyzeWithOCR(img *loader.FastImage, expectedText string) (*AnalysisResult, error) {
 	options := OCROptions().WithOCR(expectedText)
 	return oca.AnalyzeWithOptions(img, options)
 }
 
 // AnalyzeWithOptions performs image analysis with enhanced parallel processing and memory optimization
-func (oca *coreAnalyzer) AnalyzeWithOptions(img image.Image, options AnalysisOptions) (*AnalysisResult, error) {
+func (oca *coreAnalyzer) AnalyzeWithOptions(img *loader.FastImage, options AnalysisOptions) (*AnalysisResult, error) {
 	start := time.Now()
 	defer func() {
 		oca.updatePerformanceStats(time.Since(start))
@@ -111,25 +93,11 @@ func (oca *coreAnalyzer) AnalyzeWithOptions(img image.Image, options AnalysisOpt
 		result.OCRResult.OCRError = "OCR text extraction is not implemented in this version"
 	}
 
-	// Grayscale conversion with memory reuse
-	bounds := img.Bounds()
-	gray := oca.getGrayImage(bounds)
-	if gray == nil {
-		finalResult := *result
-		finalResult.Errors = append(finalResult.Errors, "Failed to allocate grayscale image")
-		// Return result to pool before returning
-		oca.resultPool.Put(result)
-		return &finalResult, nil
-	}
-	defer oca.grayPool.Put(gray)
-
-	draw.Draw(gray, bounds, img, bounds.Min, draw.Src)
-
 	// Parallel processing of different analysis components
 	if options.UseWorkerPool && !options.FastMode {
-		oca.analyzeWithParallelProcessing(img, gray, result, options)
+		oca.analyzeWithParallelProcessing(img, result, options)
 	} else {
-		oca.analyzeSequentially(img, gray, result, options)
+		oca.analyzeSequentially(img, result, options)
 	}
 
 	// Calculate processing time
@@ -146,61 +114,44 @@ func (oca *coreAnalyzer) AnalyzeWithOptions(img image.Image, options AnalysisOpt
 	return &finalResult, nil
 }
 
-// getGrayImage retrieves and properly sizes a grayscale image from the pool
-func (oca *coreAnalyzer) getGrayImage(bounds image.Rectangle) *image.Gray {
-	gray := oca.grayPool.Get().(*image.Gray)
-
-	w, h := bounds.Dx(), bounds.Dy()
-	requiredLen := w * h
-
-	// Optimize memory allocation - reuse if possible, allocate if needed
-	if cap(gray.Pix) < requiredLen {
-		// Need more capacity
-		gray.Pix = make([]uint8, requiredLen)
-	} else {
-		// Reuse existing capacity
-		gray.Pix = gray.Pix[:requiredLen]
-	}
-
-	gray.Stride = w
-	gray.Rect = bounds
-
-	return gray
-}
-
 // analyzeWithParallelProcessing performs analysis using parallel worker pool
-func (oca *coreAnalyzer) analyzeWithParallelProcessing(img image.Image, gray *image.Gray, result *AnalysisResult, options AnalysisOptions) {
+func (oca *coreAnalyzer) analyzeWithParallelProcessing(img *loader.FastImage, result *AnalysisResult, options AnalysisOptions) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
 	// Set resolution information (needed for quality validation)
-	bounds := img.Bounds()
-	width, height := bounds.Dx(), bounds.Dy()
+	meta, err := img.Metadata()
+	width, height := 0, 0
+	if err == nil {
+		width, height = meta.Size.Width, meta.Size.Height
+	}
 	result.Metrics.Resolution = fmt.Sprintf("%dx%d", width, height)
 
 	// Basic metrics calculation
 	wg.Add(1)
 	oca.workerPool.Submit(func() {
 		defer wg.Done()
-		metrics := oca.metricsCalculator.CalculateBasicMetrics(img)
-
-		mu.Lock()
-		result.Metrics.AvgLuminance = metrics.avgLuminance
-		result.Metrics.AvgSaturation = metrics.avgSaturation
-		result.Metrics.ChannelBalance = [3]float64{metrics.avgR, metrics.avgG, metrics.avgB}
-		mu.Unlock()
+		metrics, err := oca.metricsCalculator.CalculateBasicMetrics(img)
+		if err == nil {
+			mu.Lock()
+			result.Metrics.AvgLuminance = metrics.avgLuminance
+			result.Metrics.AvgSaturation = metrics.avgSaturation
+			result.Metrics.ChannelBalance = [3]float64{metrics.avgR, metrics.avgG, metrics.avgB}
+			mu.Unlock()
+		}
 	})
 
 	// Laplacian variance calculation
 	wg.Add(1)
 	oca.workerPool.Submit(func() {
 		defer wg.Done()
-		laplacianVar := oca.metricsCalculator.CalculateLaplacianVariance(gray)
-
-		mu.Lock()
-		result.Metrics.LaplacianVar = laplacianVar
-		result.Quality.Blurry = laplacianVar <= options.BlurThreshold
-		mu.Unlock()
+		laplacianVar, err := oca.metricsCalculator.CalculateLaplacianVariance(img)
+		if err == nil {
+			mu.Lock()
+			result.Metrics.LaplacianVar = laplacianVar
+			result.Quality.Blurry = laplacianVar <= options.BlurThreshold
+			mu.Unlock()
+		}
 	})
 
 	// QR detection (if enabled)
@@ -221,7 +172,7 @@ func (oca *coreAnalyzer) analyzeWithParallelProcessing(img image.Image, gray *im
 		wg.Add(1)
 		oca.workerPool.Submit(func() {
 			defer wg.Done()
-			oca.performEnhancedQualityChecks(img, gray, result, options)
+			oca.performEnhancedQualityChecks(img, result, options)
 		})
 	}
 
@@ -235,21 +186,29 @@ func (oca *coreAnalyzer) analyzeWithParallelProcessing(img image.Image, gray *im
 }
 
 // analyzeSequentially performs analysis without parallel processing (for fast mode)
-func (oca *coreAnalyzer) analyzeSequentially(img image.Image, gray *image.Gray, result *AnalysisResult, options AnalysisOptions) {
+func (oca *coreAnalyzer) analyzeSequentially(img *loader.FastImage, result *AnalysisResult, options AnalysisOptions) {
+	// Set resolution information
+	meta, err := img.Metadata()
+	width, height := 0, 0
+	if err == nil {
+		width, height = meta.Size.Width, meta.Size.Height
+	}
+	result.Metrics.Resolution = fmt.Sprintf("%dx%d", width, height)
+
 	// Calculate basic metrics
-	metrics := oca.metricsCalculator.CalculateBasicMetrics(img)
-	result.Metrics.AvgLuminance = metrics.avgLuminance
-	result.Metrics.AvgSaturation = metrics.avgSaturation
-	result.Metrics.ChannelBalance = [3]float64{metrics.avgR, metrics.avgG, metrics.avgB}
+	metrics, err := oca.metricsCalculator.CalculateBasicMetrics(img)
+	if err == nil {
+		result.Metrics.AvgLuminance = metrics.avgLuminance
+		result.Metrics.AvgSaturation = metrics.avgSaturation
+		result.Metrics.ChannelBalance = [3]float64{metrics.avgR, metrics.avgG, metrics.avgB}
+	}
 
 	// Calculate Laplacian variance for blur detection
-	result.Metrics.LaplacianVar = oca.metricsCalculator.CalculateLaplacianVariance(gray)
-	result.Quality.Blurry = result.Metrics.LaplacianVar <= options.BlurThreshold
-
-	// Set resolution information (needed for quality validation)
-	bounds := img.Bounds()
-	width, height := bounds.Dx(), bounds.Dy()
-	result.Metrics.Resolution = fmt.Sprintf("%dx%d", width, height)
+	lapVar, err := oca.metricsCalculator.CalculateLaplacianVariance(img)
+	if err == nil {
+		result.Metrics.LaplacianVar = lapVar
+		result.Quality.Blurry = result.Metrics.LaplacianVar <= options.BlurThreshold
+	}
 
 	// Check for overexposure and oversaturation
 	result.Quality.Overexposed = metrics.avgLuminance > options.OverexposureThreshold
@@ -267,7 +226,7 @@ func (oca *coreAnalyzer) analyzeSequentially(img image.Image, gray *image.Gray, 
 
 	// Enhanced quality checks for OCR mode
 	if options.OCRMode {
-		oca.performEnhancedQualityChecks(img, gray, result, options)
+		oca.performEnhancedQualityChecks(img, result, options)
 	}
 
 	// Perform quality validation to populate error messages
@@ -277,34 +236,38 @@ func (oca *coreAnalyzer) analyzeSequentially(img image.Image, gray *image.Gray, 
 }
 
 // performEnhancedQualityChecks performs additional quality checks for OCR with optimizations
-func (oca *coreAnalyzer) performEnhancedQualityChecks(img image.Image, gray *image.Gray, result *AnalysisResult, options AnalysisOptions) {
-	bounds := img.Bounds()
-	width, height := bounds.Dx(), bounds.Dy()
-
+func (oca *coreAnalyzer) performEnhancedQualityChecks(img *loader.FastImage, result *AnalysisResult, options AnalysisOptions) {
+	meta, _ := img.Metadata()
+	width, height := meta.Size.Width, meta.Size.Height
+	
 	// Set resolution information
 	result.Metrics.Resolution = fmt.Sprintf("%dx%d", width, height)
 	result.Quality.IsLowResolution = width*height < 800000 || width < 800 || height < 1000
 
 	// Calculate brightness
-	result.Metrics.Brightness = oca.metricsCalculator.CalculateBrightness(gray)
-	result.Quality.IsTooDark = result.Metrics.Brightness < 80
-	result.Quality.IsTooBright = result.Metrics.Brightness > 220
+	brightness, err := oca.metricsCalculator.CalculateBrightness(img)
+	if err == nil {
+		result.Metrics.Brightness = brightness
+		result.Quality.IsTooDark = result.Metrics.Brightness < 80
+		result.Quality.IsTooBright = result.Metrics.Brightness > 220
+	}
 
 	// Detect skew
-	skewAngle := oca.metricsCalculator.DetectSkew(gray)
-	if skewAngle != nil {
+	skewAngle, err := oca.metricsCalculator.DetectSkew(img)
+	if err == nil && skewAngle != nil {
 		result.Quality.SkewAngle = skewAngle
 		result.Quality.IsSkewed = *skewAngle > 5 || *skewAngle < -5
 	}
 
 	// Count contours (skip if disabled)
 	if !options.SkipContourDetection {
-		result.Metrics.NumContours = oca.metricsCalculator.DetectContours(gray)
+		contours, _ := oca.metricsCalculator.DetectContours(img)
+		result.Metrics.NumContours = contours
 	}
 
 	// Simple document edge detection (skip if disabled)
 	if !options.SkipEdgeDetection {
-		result.Quality.HasDocumentEdges = oca.detectDocumentEdges(gray)
+		result.Quality.HasDocumentEdges = oca.detectDocumentEdges(img)
 	}
 
 	// Perform quality validation using QualityValidator
@@ -385,26 +348,44 @@ func (oca *coreAnalyzer) hasWhiteBalanceIssue(avgR, avgG, avgB float64) bool {
 }
 
 // detectDocumentEdges performs basic document edge detection
-func (oca *coreAnalyzer) detectDocumentEdges(gray *image.Gray) bool {
-	bounds := gray.Bounds()
-	width, height := bounds.Dx(), bounds.Dy()
+func (oca *coreAnalyzer) detectDocumentEdges(img *loader.FastImage) bool {
+	// Zero-copy conversion to gray for manual pixel check
+	grayImg, err := img.ConvertToGrayscale()
+	if err != nil {
+		return false
+	}
+	
+	meta, err := grayImg.Metadata()
+	if err != nil {
+		return false
+	}
+	width, height := meta.Size.Width, meta.Size.Height
+	
+	buf := grayImg.Buffer()
+	
+	// Access pixel at (x, y) assuming stride=width
+	at := func(x, y int) uint8 {
+		if x < 0 || x >= width || y < 0 || y >= height {
+			return 0
+		}
+		return buf[y*width+x]
+	}
 
 	// Simple heuristic: check if corners are significantly different from center
 	corners := []image.Point{
-		{bounds.Min.X + 10, bounds.Min.Y + 10}, // Top-left
-		{bounds.Max.X - 10, bounds.Min.Y + 10}, // Top-right
-		{bounds.Min.X + 10, bounds.Max.Y - 10}, // Bottom-left
-		{bounds.Max.X - 10, bounds.Max.Y - 10}, // Bottom-right
+		{10, 10}, // Top-left
+		{width - 10, 10}, // Top-right
+		{10, height - 10}, // Bottom-left
+		{width - 10, height - 10}, // Bottom-right
 	}
 
-	center := gray.GrayAt(width/2, height/2).Y
+	center := int(at(width/2, height/2))
 	differentCorners := 0
 
 	for _, corner := range corners {
-		if corner.X >= bounds.Min.X && corner.X < bounds.Max.X &&
-			corner.Y >= bounds.Min.Y && corner.Y < bounds.Max.Y {
-			cornerValue := gray.GrayAt(corner.X, corner.Y).Y
-			if abs(int(cornerValue)-int(center)) > 30 {
+		if corner.X >= 0 && corner.X < width && corner.Y >= 0 && corner.Y < height {
+			cornerValue := int(at(corner.X, corner.Y))
+			if abs(cornerValue-center) > 30 {
 				differentCorners++
 			}
 		}

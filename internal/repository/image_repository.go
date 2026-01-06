@@ -37,6 +37,14 @@ func (r *HTTPImageRepository) FetchImage(ctx context.Context, imageURL string) (
 	return r.fetcher.FetchImage(ctx, imageURL)
 }
 
+// FetchImageBytes retrieves raw image bytes from a URL
+func (r *HTTPImageRepository) FetchImageBytes(ctx context.Context, imageURL string) ([]byte, error) {
+	if err := r.validator.ValidateImageURL(imageURL); err != nil {
+		return nil, fmt.Errorf("invalid image URL: %w", err)
+	}
+	return r.fetcher.FetchImageBytes(ctx, imageURL)
+}
+
 // ValidateImageURL validates if the provided URL is acceptable
 func (r *HTTPImageRepository) ValidateImageURL(imageURL string) error {
 	return r.validator.ValidateImageURL(imageURL)

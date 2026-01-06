@@ -12,11 +12,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
 type ImageFetcher interface {
 	FetchImage(ctx context.Context, imageURL string) (image.Image, error)
+	FetchImageBytes(ctx context.Context, imageURL string) ([]byte, error)
 }
 
 // HTTPImageFetcher implements ImageFetcher with performance enhancements
@@ -110,6 +112,22 @@ func NewHTTPImageFetcher(fetchTimeout time.Duration) ImageFetcher {
 }
 
 func (h *HTTPImageFetcher) FetchImage(ctx context.Context, imageURL string) (image.Image, error) {
+	bytes, err := h.FetchImageBytes(ctx, imageURL)
+	if err != nil {
+		return nil, err
+	}
+
+	// Decode using standard library as fallback/legacy support
+	// Note: In high-performance path, FetchImageBytes should be used directly with bimg
+	img, _, err := image.Decode(strings.NewReader(string(bytes)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode image: %w", err)
+	}
+
+	return img, nil
+}
+
+func (h *HTTPImageFetcher) FetchImageBytes(ctx context.Context, imageURL string) ([]byte, error) {
 	// Validate URL scheme and host before making any requests
 	u, err := url.Parse(imageURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
@@ -124,16 +142,15 @@ func (h *HTTPImageFetcher) FetchImage(ctx context.Context, imageURL string) (ima
 	// Headers for image downloads
 	req.Header.Set("Accept", "image/jpeg, image/png, image/gif")
 	req.Header.Set("User-Agent", "Go-Image-Inspector/2.0")
-	// Remove Accept-Encoding header to let Go handle decompression automatically
 
-	// Retry logic (3 attempts) - only retry on transient errors
+	// Retry logic (3 attempts)
 	var resp *http.Response
 	var lastErr error
 
 	for attempt := 0; attempt < 3; attempt++ {
 		resp, err = h.client.Do(req)
 		if err != nil {
-			if ctx.Err() != nil { // cancelled or deadline exceeded
+			if ctx.Err() != nil {
 				lastErr = ctx.Err()
 				break
 			}
@@ -147,41 +164,32 @@ func (h *HTTPImageFetcher) FetchImage(ctx context.Context, imageURL string) (ima
 
 		// Handle response with error status code
 		if err == nil && resp != nil {
-			// Use closure to ensure body is always closed
 			func() {
 				defer resp.Body.Close()
-
-				// 4xx client errors are non-retryable - break immediately
 				if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 					lastErr = fmt.Errorf("client error: status code %d", resp.StatusCode)
 					return
 				}
-
-				// 5xx server errors are retryable
 				if resp.StatusCode >= 500 {
 					lastErr = fmt.Errorf("server error: status code %d", resp.StatusCode)
 				}
 			}()
 
-			// Break immediately for 4xx errors (non-retryable)
 			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-				resp = nil // Clear resp so we don't try to use it later
+				resp = nil
 				break
 			}
 		}
 
-		// Sleep before next retry (only for retryable cases and not on last attempt)
 		if attempt < 2 && (err != nil || (resp != nil && resp.StatusCode >= 500)) {
 			time.Sleep(time.Duration(attempt+1) * time.Second)
 		}
 
-		// Clear resp for next iteration if it's not the successful response
 		if resp != nil && (err != nil || resp.StatusCode != http.StatusOK) {
 			resp = nil
 		}
 	}
 
-	// Check final result
 	if resp == nil || resp.StatusCode != http.StatusOK {
 		if lastErr != nil {
 			return nil, fmt.Errorf("failed to fetch image after 3 attempts: %w", lastErr)
@@ -191,18 +199,23 @@ func (h *HTTPImageFetcher) FetchImage(ctx context.Context, imageURL string) (ima
 
 	defer resp.Body.Close()
 
-	// Guard against oversized responses (zip-bombs / memory pressure)
+	// Guard against oversized responses
 	const maxImageBytes = 25 * 1024 * 1024 // 25MB limit
 	if resp.ContentLength > maxImageBytes && resp.ContentLength > 0 {
 		return nil, fmt.Errorf("image too large: %d bytes", resp.ContentLength)
 	}
 	limited := io.LimitReader(resp.Body, maxImageBytes+1)
-	img, _, err := image.Decode(limited)
+	
+	bytes, err := io.ReadAll(limited)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode image: %w", err)
+		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	return img, nil
+	if int64(len(bytes)) > maxImageBytes {
+		return nil, fmt.Errorf("image too large: >%d bytes", maxImageBytes)
+	}
+
+	return bytes, nil
 }
 
 // isPrivateOrLoopback reports whether the given IP (string form) is non-public.

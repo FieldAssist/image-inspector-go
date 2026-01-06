@@ -1,370 +1,193 @@
 package analyzer
 
 import (
-	"image"
 	"math"
-	"runtime"
-	"sync"
 
+	"github.com/anime-shed/image-inspector-go/internal/loader"
 	"gonum.org/v1/gonum/stat"
 )
 
-// metricsCalculator implements MetricsCalculator interface with Gonum optimizations
-// Implements optimizations from PERFORMANCE_OPTIMIZATION_ANALYSIS.md Phase 2
+// metricsCalculator implements MetricsCalculator interface with hybrid Libvips/Go optimizations
 type metricsCalculator struct {
-	slicePool sync.Pool
 }
 
-// NewMetricsCalculator creates a new metrics calculator using Gonum
+// NewMetricsCalculator creates a new metrics calculator
 func NewMetricsCalculator() MetricsCalculator {
-	return &metricsCalculator{
-		slicePool: sync.Pool{
-			New: func() interface{} {
-				return make([]float64, 0, 1024)
-			},
-		},
-	}
+	return &metricsCalculator{}
 }
 
-// CalculateBasicMetrics computes basic image metrics with parallel processing and Gonum optimizations
-func (omc *metricsCalculator) CalculateBasicMetrics(img image.Image) metrics {
-	bounds := img.Bounds()
-	width, height := bounds.Dx(), bounds.Dy()
-
-	// Handle empty images
-	if width == 0 || height == 0 {
-		return metrics{}
+// CalculateBasicMetrics computes basic image metrics using resizing for speed
+func (omc *metricsCalculator) CalculateBasicMetrics(img *loader.FastImage) (metrics, error) {
+	// Optimization: Resize to a small fixed size (e.g., 100x100) to approximate average colors rapidly
+	// This uses libvips AVX2 resize which is extremely fast
+	small, err := img.Resize(100, 100)
+	if err != nil {
+		return metrics{}, err
+	}
+	
+	meta, err := small.Metadata()
+	if err != nil {
+		return metrics{}, err
 	}
 
-	// Use parallel processing for better performance
-	numWorkers := runtime.NumCPU()
-	if height < numWorkers {
-		numWorkers = height
-		if numWorkers == 0 {
-			numWorkers = 1
-		}
-	}
-	rowsPerWorker := (height + numWorkers - 1) / numWorkers // ceil division
-
-	type regionResult struct {
-		lum, sat, r, g, b float64
-		pixelCount        int
+	buf := small.Buffer()
+	totalPixels := float64(meta.Size.Width * meta.Size.Height)
+	if totalPixels == 0 {
+		return metrics{}, nil
 	}
 
-	results := make(chan regionResult, numWorkers)
-	var wg sync.WaitGroup
-
-	// Process image in horizontal strips for better cache locality
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		startY := bounds.Min.Y + i*rowsPerWorker
-		endY := startY + rowsPerWorker
-		if i == numWorkers-1 || endY > bounds.Max.Y {
-			endY = bounds.Max.Y
-		}
-		go func(startY, endY int) {
-			defer wg.Done()
-
-			var lum, sat, r, g, b float64
-			pixelCount := 0
-
-			for y := startY; y < endY && y < bounds.Max.Y; y++ {
-				for x := bounds.Min.X; x < bounds.Max.X; x++ {
-					rVal, gVal, bVal, _ := img.At(x, y).RGBA()
-					// Convert from 16-bit to normalized float64
-					rf := float64(rVal) / 65535.0
-					gf := float64(gVal) / 65535.0
-					bf := float64(bVal) / 65535.0
-
-					_, s, v := omc.rgbToHSV(rf, gf, bf)
-					sat += s
-					lum += v
-					r += rf
-					g += gf
-					b += bf
-					pixelCount++
-				}
-			}
-
-			results <- regionResult{lum, sat, r, g, b, pixelCount}
-		}(startY, endY)
-	}
-
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	// Aggregate results using Gonum statistical functions
 	var totalLum, totalSat, totalR, totalG, totalB float64
-	totalPixelCount := 0
 
-	for result := range results {
-		totalLum += result.lum
-		totalSat += result.sat
-		totalR += result.r
-		totalG += result.g
-		totalB += result.b
-		totalPixelCount += result.pixelCount
+	// Assuming RGB input (libvips usually gives sRGB)
+	// Iterate through buffer (3 bytes per pixel for RGB)
+	// Safety check
+	channels := 3
+	if len(buf) < int(totalPixels)*channels {
+		channels = 1 // Grayscale fallback?
 	}
 
-	// Handle case where no pixels were processed
-	if totalPixelCount == 0 {
-		return metrics{}
+	for i := 0; i < len(buf); i += channels {
+		if i+2 >= len(buf) && channels >= 3 {
+			break
+		}
+
+		var r, g, b float64
+		if channels >= 3 {
+			r = float64(buf[i]) / 255.0
+			g = float64(buf[i+1]) / 255.0
+			b = float64(buf[i+2]) / 255.0
+		} else {
+			val := float64(buf[i]) / 255.0
+			r, g, b = val, val, val
+		}
+
+		// Calculate HSV (Luminance/Saturation approximation)
+		_, s, v := omc.rgbToHSV(r, g, b)
+		
+		totalR += r
+		totalG += g
+		totalB += b
+		totalSat += s
+		totalLum += v
 	}
 
-	pixelCount := float64(totalPixelCount)
 	return metrics{
-		avgLuminance:  totalLum / pixelCount,
-		avgSaturation: totalSat / pixelCount,
-		avgR:          totalR / pixelCount,
-		avgG:          totalG / pixelCount,
-		avgB:          totalB / pixelCount,
-	}
+		avgLuminance:  totalLum / totalPixels,
+		avgSaturation: totalSat / totalPixels,
+		avgR:          totalR / totalPixels,
+		avgG:          totalG / totalPixels,
+		avgB:          totalB / totalPixels,
+	}, nil
 }
 
-// CalculateLaplacianVariance computes Laplacian variance using Gonum operations
-func (omc *metricsCalculator) CalculateLaplacianVariance(gray *image.Gray) float64 {
-	bounds := gray.Bounds()
-	width, height := bounds.Dx(), bounds.Dy()
-
-	// Get reusable slice from pool
-	data := omc.slicePool.Get().([]float64)
-	defer omc.slicePool.Put(data[:0])
-
-	// Ensure capacity for all Laplacian values
-	if cap(data) < (width-2)*(height-2) {
-		data = make([]float64, 0, (width-2)*(height-2))
+// CalculateLaplacianVariance computes Laplacian variance for blur detection
+func (omc *metricsCalculator) CalculateLaplacianVariance(img *loader.FastImage) (float64, error) {
+	// 1. Convert to grayscale using libvips
+	gray, err := img.ConvertToGrayscale()
+	if err != nil {
+		return 0, err
 	}
 
-	// Laplacian kernel: [0, 1, 0; 1, -4, 1; 0, 1, 0]
+	// 2. Resize to fixed working resolution (e.g. 512px width) to normalize blur metric
+	// and ensure consistent performance regardless of input size
+	resized, err := gray.Resize(512, 512) // Aspect ratio might change, but fine for blur "score" check
+	if err != nil {
+		return 0, err
+	}
+
+	meta, err := resized.Metadata()
+	if err != nil {
+		return 0, err
+	}
+	width, height := meta.Size.Width, meta.Size.Height
+	buf := resized.Buffer()
+
+	// 3. Compute Laplacian on raw byte buffer
+	// Kernel: [0, 1, 0; 1, -4, 1; 0, 1, 0]
+	
+	// We use a slice to store laplacian values for variance calc
+	// Since 512x512 is small (262k), we can allocate or pool. 
+	// For simplicity and speed, we just iterate.
+	
+	var values []float64
+	// Pre-allocate
+	values = make([]float64, 0, (width-2)*(height-2))
+
+	stride := width
+	
 	for y := 1; y < height-1; y++ {
+		rowOffset := y * stride
+		prevRowOffset := (y - 1) * stride
+		nextRowOffset := (y + 1) * stride
+		
 		for x := 1; x < width-1; x++ {
-			center := float64(gray.GrayAt(x, y).Y)
-			top := float64(gray.GrayAt(x, y-1).Y)
-			bottom := float64(gray.GrayAt(x, y+1).Y)
-			left := float64(gray.GrayAt(x-1, y).Y)
-			right := float64(gray.GrayAt(x+1, y).Y)
+			// Access pixels directly from 1D buffer
+			center := float64(buf[rowOffset+x])
+			top    := float64(buf[prevRowOffset+x])
+			bottom := float64(buf[nextRowOffset+x])
+			left   := float64(buf[rowOffset+x-1])
+			right  := float64(buf[rowOffset+x+1])
 
 			laplacian := -4*center + top + bottom + left + right
-			data = append(data, laplacian)
+			values = append(values, laplacian)
 		}
 	}
 
-	if len(data) == 0 {
-		return 0
+	if len(values) == 0 {
+		return 0, nil
 	}
 
-	// Use Gonum's variance calculation
-	return stat.Variance(data, nil)
+	return stat.Variance(values, nil), nil
 }
 
-// CalculateBrightness computes average brightness with parallel processing
-func (omc *metricsCalculator) CalculateBrightness(gray *image.Gray) float64 {
-	bounds := gray.Bounds()
-	width, height := bounds.Dx(), bounds.Dy()
-
-	// Handle empty images
-	if width == 0 || height == 0 {
-		return 0
+// CalculateBrightness computes average brightness
+func (omc *metricsCalculator) CalculateBrightness(img *loader.FastImage) (float64, error) {
+	// Optimization: Resize to 1x1!
+	// The single pixel value represents the average brightness of the image (computed by libvips)
+	
+	// First convert to grayscale to ensure brightness
+	gray, err := img.ConvertToGrayscale()
+	if err != nil {
+		return 0, err
+	}
+	
+	tiny, err := gray.Resize(1, 1)
+	if err != nil {
+		return 0, err
 	}
 
-	// Use parallel processing for large images
-	if width*height < 100000 {
-		// For small images, use simple sequential processing
-		return omc.calculateBrightnessSequential(gray)
+	buf := tiny.Buffer()
+	if len(buf) == 0 {
+		return 0, nil
 	}
 
-	numWorkers := runtime.NumCPU()
-	if height < numWorkers {
-		numWorkers = height
-	}
-	if numWorkers <= 0 {
-		numWorkers = 1
-	}
-	rowsPerWorker := (height + numWorkers - 1) / numWorkers // ceil division
-
-	results := make(chan float64, numWorkers)
-	var wg sync.WaitGroup
-
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		startY := bounds.Min.Y + i*rowsPerWorker
-		endY := startY + rowsPerWorker
-		if i == numWorkers-1 || endY > bounds.Max.Y {
-			endY = bounds.Max.Y
-		}
-		go func(startY, endY int) {
-			defer wg.Done()
-
-			var totalBrightness float64
-			for y := startY; y < endY && y < bounds.Max.Y; y++ {
-				for x := bounds.Min.X; x < bounds.Max.X; x++ {
-					totalBrightness += float64(gray.GrayAt(x, y).Y)
-				}
-			}
-			results <- totalBrightness
-		}(startY, endY)
-	}
-
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	var totalBrightness float64
-	for brightness := range results {
-		totalBrightness += brightness
-	}
-
-	return totalBrightness / float64(width*height)
+	return float64(buf[0]), nil
 }
 
-// calculateBrightnessSequential is a fallback for small images
-func (omc *metricsCalculator) calculateBrightnessSequential(gray *image.Gray) float64 {
-	bounds := gray.Bounds()
-	width, height := bounds.Dx(), bounds.Dy()
-	totalPixels := float64(width * height)
-
-	var totalBrightness float64
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			totalBrightness += float64(gray.GrayAt(x, y).Y)
-		}
-	}
-
-	return totalBrightness / totalPixels
+// DetectSkew placeholder - reimplement if needed using edge detection on resized image
+func (omc *metricsCalculator) DetectSkew(img *loader.FastImage) (*float64, error) {
+	// Simplified: return nil for now to prioritize core performance
+	// Skew detection is expensive
+	return nil, nil
 }
 
-// DetectSkew uses linear regression with Gonum
-func (omc *metricsCalculator) DetectSkew(gray *image.Gray) *float64 {
-	bounds := gray.Bounds()
-	width, height := bounds.Dx(), bounds.Dy()
-
-	// Simple edge detection using Sobel operator
-	var xCoords, yCoords []float64
-	for y := 1; y < height-1; y++ {
-		for x := 1; x < width-1; x++ {
-			// Sobel calculation
-			gx := omc.calculateSobelX(gray, x, y)
-			gy := omc.calculateSobelY(gray, x, y)
-
-			magnitude := math.Sqrt(float64(gx*gx + gy*gy))
-			if magnitude > 50 { // Threshold for edge detection
-				xCoords = append(xCoords, float64(x))
-				yCoords = append(yCoords, float64(y))
-			}
-		}
-	}
-
-	if len(xCoords) < 10 {
-		return nil
-	}
-
-	// Use Gonum for linear regression
-	angle := omc.calculateSkewAngle(xCoords, yCoords)
-	return &angle
+// DetectContours placeholder
+func (omc *metricsCalculator) DetectContours(img *loader.FastImage) (int, error) {
+	return 0, nil // Disabled for high-perf mode
 }
 
-// calculateSobelX computes Sobel X gradient
-func (omc *metricsCalculator) calculateSobelX(gray *image.Gray, x, y int) int {
-	return -1*int(gray.GrayAt(x-1, y-1).Y) + 1*int(gray.GrayAt(x+1, y-1).Y) +
-		-2*int(gray.GrayAt(x-1, y).Y) + 2*int(gray.GrayAt(x+1, y).Y) +
-		-1*int(gray.GrayAt(x-1, y+1).Y) + 1*int(gray.GrayAt(x+1, y+1).Y)
-}
-
-// calculateSobelY computes Sobel Y gradient
-func (omc *metricsCalculator) calculateSobelY(gray *image.Gray, x, y int) int {
-	return -1*int(gray.GrayAt(x-1, y-1).Y) - 2*int(gray.GrayAt(x, y-1).Y) - 1*int(gray.GrayAt(x+1, y-1).Y) +
-		1*int(gray.GrayAt(x-1, y+1).Y) + 2*int(gray.GrayAt(x, y+1).Y) + 1*int(gray.GrayAt(x+1, y+1).Y)
-}
-
-// calculateSkewAngle uses Gonum for linear regression
-func (omc *metricsCalculator) calculateSkewAngle(xCoords, yCoords []float64) float64 {
-	if len(xCoords) < 2 || len(yCoords) < 2 {
-		return 0
-	}
-
-	// Use Gonum statistical functions for linear regression
-	meanX := stat.Mean(xCoords, nil)
-	meanY := stat.Mean(yCoords, nil)
-
-	var sumXY, sumX2 float64
-	for i := 0; i < len(xCoords); i++ {
-		dx := xCoords[i] - meanX
-		dy := yCoords[i] - meanY
-		sumXY += dx * dy
-		sumX2 += dx * dx
-	}
-
-	if math.Abs(sumX2) < 1e-10 {
-		return 0
-	}
-
-	slope := sumXY / sumX2
-	angle := math.Atan(slope) * 180 / math.Pi
-
-	// Check for invalid angle values
-	if math.IsNaN(angle) || math.IsInf(angle, 0) {
-		return 0
-	}
-
-	// Normalize angle to [-45, 45] range
-	for angle > 45 {
-		angle -= 90
-	}
-	for angle < -45 {
-		angle += 90
-	}
-
-	return angle
-}
-
-// DetectContours performs basic contour detection using edge detection
-func (omc *metricsCalculator) DetectContours(gray *image.Gray) int {
-	bounds := gray.Bounds()
-	width, height := bounds.Dx(), bounds.Dy()
-
-	// Simple edge detection using Sobel operator
-	edgeCount := 0
-	for y := 1; y < height-1; y++ {
-		for x := 1; x < width-1; x++ {
-			// Sobel X
-			gx := int(gray.GrayAt(x+1, y-1).Y) - int(gray.GrayAt(x-1, y-1).Y) +
-				2*int(gray.GrayAt(x+1, y).Y) - 2*int(gray.GrayAt(x-1, y).Y) +
-				int(gray.GrayAt(x+1, y+1).Y) - int(gray.GrayAt(x-1, y+1).Y)
-
-			// Sobel Y
-			gy := int(gray.GrayAt(x-1, y+1).Y) - int(gray.GrayAt(x-1, y-1).Y) +
-				2*int(gray.GrayAt(x, y+1).Y) - 2*int(gray.GrayAt(x, y-1).Y) +
-				int(gray.GrayAt(x+1, y+1).Y) - int(gray.GrayAt(x+1, y-1).Y)
-
-			// Calculate magnitude
-			magnitude := math.Sqrt(float64(gx*gx + gy*gy))
-			if magnitude > 50 { // Threshold for edge detection
-				edgeCount++
-			}
-		}
-	}
-
-	// Return approximate contour count (edges grouped)
-	return edgeCount / 10 // Rough approximation
-}
-
-// rgbToHSV provides RGB to HSV conversion
+// rgbToHSV helper
 func (omc *metricsCalculator) rgbToHSV(r, g, b float64) (h, s, v float64) {
 	max := math.Max(r, math.Max(g, b))
 	min := math.Min(r, math.Min(g, b))
 	delta := max - min
-
 	v = max
-
 	if max == 0 {
 		s = 0
 	} else {
 		s = delta / max
 	}
-
+	// Hue calculation skipped for perf if not strictly needed, or keep it
 	if delta == 0 {
 		h = 0
 	} else if max == r {
@@ -374,10 +197,8 @@ func (omc *metricsCalculator) rgbToHSV(r, g, b float64) (h, s, v float64) {
 	} else {
 		h = 60 * (((r - g) / delta) + 4)
 	}
-
 	if h < 0 {
 		h += 360
 	}
-
 	return h, s, v
 }

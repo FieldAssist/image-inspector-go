@@ -2,7 +2,8 @@ package analyzer
 
 import (
 	"image"
-	"image/draw"
+	
+	"github.com/anime-shed/image-inspector-go/internal/loader"
 )
 
 // qrDetector implements QRDetector interface
@@ -14,13 +15,27 @@ func NewQRDetector() QRDetector {
 }
 
 // DetectQRCode detects if the image contains a QR code
-func (qd *qrDetector) DetectQRCode(img image.Image) bool {
-	// Convert to grayscale for processing
-	bounds := img.Bounds()
-	gray := image.NewGray(bounds)
-	draw.Draw(gray, bounds, img, bounds.Min, draw.Src)
+func (qd *qrDetector) DetectQRCode(img *loader.FastImage) bool {
+	// Convert to grayscale using libvips (fast)
+	grayImg, err := img.ConvertToGrayscale()
+	if err != nil {
+		return false
+	}
 
-	width, height := bounds.Dx(), bounds.Dy()
+	meta, err := grayImg.Metadata()
+	if err != nil {
+		return false
+	}
+	
+	// Zero-copy wrapper: Create image.Gray from the existing buffer
+	// bimg/libvips buffers are typically tightly packed, so Stride = Width
+	width, height := meta.Size.Width, meta.Size.Height
+	gray := &image.Gray{
+		Pix:    grayImg.Buffer(),
+		Stride: width,
+		Rect:   image.Rect(0, 0, width, height),
+	}
+
 	return qd.hasQRPattern(gray, width, height)
 }
 

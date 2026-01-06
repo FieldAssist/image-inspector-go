@@ -2,11 +2,11 @@ package service
 
 import (
 	"context"
-	"image"
 	"strings"
 
 	"github.com/anime-shed/image-inspector-go/internal/analyzer"
 	apperrors "github.com/anime-shed/image-inspector-go/internal/errors"
+	"github.com/anime-shed/image-inspector-go/internal/loader"
 	"github.com/anime-shed/image-inspector-go/internal/repository"
 	"github.com/anime-shed/image-inspector-go/pkg/models"
 )
@@ -63,14 +63,18 @@ func (s *imageAnalysisService) AnalyzeImageWithOptions(ctx context.Context, imag
 		return nil, apperrors.NewValidationError("invalid image URL", err)
 	}
 
-	// Fetch image
-	img, err := s.imageRepo.FetchImage(ctx, imageURL)
+	// Fetch image bytes (Optimized I/O)
+	imgBytes, err := s.imageRepo.FetchImageBytes(ctx, imageURL)
 	if err != nil {
 		return nil, apperrors.NewNetworkError("failed to fetch image", err)
 	}
 
+	// Create FastImage loader
+	// This uses bimg (libvips) for high-performance processing
+	fastImg := loader.NewFastImage(imgBytes)
+
 	// Analyze image with options using single analyzer
-	result, err := s.analyzer.AnalyzeWithOptions(img, options)
+	result, err := s.analyzer.AnalyzeWithOptions(fastImg, options)
 	if err != nil {
 		return nil, apperrors.NewProcessingError("failed to analyze image", err)
 	}
@@ -88,23 +92,26 @@ func (s *imageAnalysisService) AnalyzeImageDetailed(ctx context.Context, request
 		return nil, apperrors.NewValidationError("invalid image URL", err)
 	}
 
-	// Fetch image
-	img, err := s.imageRepo.FetchImage(ctx, request.URL)
+	// Fetch image bytes (Optimized I/O)
+	imgBytes, err := s.imageRepo.FetchImageBytes(ctx, request.URL)
 	if err != nil {
 		return nil, apperrors.NewNetworkError("failed to fetch image", err)
 	}
+
+	// Create FastImage loader
+	fastImg := loader.NewFastImage(imgBytes)
 
 	// Configure detailed analysis options
 	options := s.createDetailedAnalysisOptions(request)
 
 	// Analyze image with same analyzer but detailed options
-	result, err := s.analyzer.AnalyzeWithOptions(img, options)
+	result, err := s.analyzer.AnalyzeWithOptions(fastImg, options)
 	if err != nil {
 		return nil, apperrors.NewProcessingError("failed to analyze image", err)
 	}
 
 	// Convert to detailed response with full context
-	response := s.convertToDetailedResponse(ctx, request, options, result, img)
+	response := s.convertToDetailedResponse(ctx, request, options, result, fastImg)
 
 	return response, nil
 }
@@ -206,11 +213,16 @@ func (s *imageAnalysisService) convertToBasicResponse(imageURL string, result *m
 }
 
 // convertToDetailedResponse converts analyzer result to detailed service response
-func (s *imageAnalysisService) convertToDetailedResponse(ctx context.Context, request models.DetailedAnalysisRequest, options analyzer.AnalysisOptions, result *models.AnalysisResult, img image.Image) *models.DetailedAnalysisResponse {
-	// Extract image dimensions
-	width, height := s.getImageDimensions(img)
+func (s *imageAnalysisService) convertToDetailedResponse(ctx context.Context, request models.DetailedAnalysisRequest, options analyzer.AnalysisOptions, result *models.AnalysisResult, img *loader.FastImage) *models.DetailedAnalysisResponse {
+	// Extract image dimensions from metadata
+	width, height := 0, 0
+	meta, err := img.Metadata()
+	if err == nil {
+		width, height = meta.Size.Width, meta.Size.Height
+	}
 
 	// Get image metadata (content length, format, etc.)
+	// Note: We could get Format/Type from img.Metadata() too, but ContentLength comes from HEAD request via repository
 	metadata, err := s.imageRepo.GetImageMetadata(ctx, request.URL)
 	if err != nil {
 		// Fallback to defaults if metadata fetch fails
@@ -347,14 +359,6 @@ func (s *imageAnalysisService) convertToDetailedResponse(ctx context.Context, re
 }
 
 // Helper methods
-func (s *imageAnalysisService) getImageDimensions(img image.Image) (int, int) {
-	if img == nil {
-		return 0, 0
-	}
-	bounds := img.Bounds()
-	return bounds.Dx(), bounds.Dy()
-}
-
 func (s *imageAnalysisService) calculateQualityScore(result *models.AnalysisResult) float64 {
 	score := 100.0
 
