@@ -248,8 +248,8 @@ func (oca *coreAnalyzer) performEnhancedQualityChecks(img *loader.FastImage, res
 	brightness, err := oca.metricsCalculator.CalculateBrightness(img)
 	if err == nil {
 		result.Metrics.Brightness = brightness
-		result.Quality.IsTooDark = result.Metrics.Brightness < 80
-		result.Quality.IsTooBright = result.Metrics.Brightness > 220
+		result.Quality.IsTooDark = result.Metrics.Brightness < 75
+		result.Quality.IsTooBright = result.Metrics.Brightness > 230
 	}
 
 	// Detect skew
