@@ -22,8 +22,8 @@ type coreAnalyzer struct {
 	qrDetector        QRDetector
 
 	// Enhanced memory pools with better sizing
-	resultPool    sync.Pool
-	
+	resultPool sync.Pool
+
 	// Performance monitoring
 	analysisCount    int64
 	totalProcessTime time.Duration
@@ -72,7 +72,7 @@ func (oca *coreAnalyzer) AnalyzeWithOptions(img *loader.FastImage, options Analy
 	// Get result from pool and reset it efficiently
 	result := oca.resultPool.Get().(*AnalysisResult)
 	*result = AnalysisResult{} // Reset the result
-	
+
 	// Use defer with anonymous function to ensure cleanup even on panic
 	defer func() {
 		if r := recover(); r != nil {
@@ -108,7 +108,7 @@ func (oca *coreAnalyzer) AnalyzeWithOptions(img *loader.FastImage, options Analy
 	finalResult := *result
 	// Ensure processing time is copied
 	finalResult.ProcessingTimeSec = processingTime
-	
+
 	// Return result to pool before returning the copy
 	oca.resultPool.Put(result)
 	return &finalResult, nil
@@ -147,9 +147,12 @@ func (oca *coreAnalyzer) analyzeWithParallelProcessing(img *loader.FastImage, re
 		defer wg.Done()
 		laplacianVar, err := oca.metricsCalculator.CalculateLaplacianVariance(img)
 		if err == nil {
+			// CHANGE 1: Make blur rejection "hard" (more lenient overall)
+			hard := options.BlurThreshold * 0.5
+
 			mu.Lock()
 			result.Metrics.LaplacianVar = laplacianVar
-			result.Quality.Blurry = laplacianVar <= options.BlurThreshold
+			result.Quality.Blurry = laplacianVar <= hard
 			mu.Unlock()
 		}
 	})
@@ -177,6 +180,16 @@ func (oca *coreAnalyzer) analyzeWithParallelProcessing(img *loader.FastImage, re
 	}
 
 	wg.Wait()
+
+	// CHANGE 2: Align parallel path with sequential checks (previously missing)
+	// Also: slightly relax exposure/saturation rejections (CHANGE 4)
+	result.Quality.Overexposed = result.Metrics.AvgLuminance > (options.OverexposureThreshold * 1.15)
+	result.Quality.Oversaturated = result.Metrics.AvgSaturation > (options.OversaturationThreshold * 1.15)
+
+	if !options.SkipWhiteBalance {
+		cb := result.Metrics.ChannelBalance
+		result.Quality.IncorrectWB = oca.hasWhiteBalanceIssue(cb[0], cb[1], cb[2])
+	}
 
 	// Perform quality validation to populate error messages
 	oca.performQualityValidation(result, options)
@@ -206,13 +219,17 @@ func (oca *coreAnalyzer) analyzeSequentially(img *loader.FastImage, result *Anal
 	// Calculate Laplacian variance for blur detection
 	lapVar, err := oca.metricsCalculator.CalculateLaplacianVariance(img)
 	if err == nil {
+		// CHANGE 1: Make blur rejection "hard" (more lenient overall)
+		hard := options.BlurThreshold * 0.5
+
 		result.Metrics.LaplacianVar = lapVar
-		result.Quality.Blurry = result.Metrics.LaplacianVar <= options.BlurThreshold
+		result.Quality.Blurry = result.Metrics.LaplacianVar <= hard
 	}
 
 	// Check for overexposure and oversaturation
-	result.Quality.Overexposed = metrics.avgLuminance > options.OverexposureThreshold
-	result.Quality.Oversaturated = metrics.avgSaturation > options.OversaturationThreshold
+	// CHANGE 4: slightly relax these comparisons
+	result.Quality.Overexposed = metrics.avgLuminance > (options.OverexposureThreshold * 1.15)
+	result.Quality.Oversaturated = metrics.avgSaturation > (options.OversaturationThreshold * 1.15)
 
 	// Check white balance (skip if disabled)
 	if !options.SkipWhiteBalance {
@@ -239,7 +256,7 @@ func (oca *coreAnalyzer) analyzeSequentially(img *loader.FastImage, result *Anal
 func (oca *coreAnalyzer) performEnhancedQualityChecks(img *loader.FastImage, result *AnalysisResult, options AnalysisOptions) {
 	meta, _ := img.Metadata()
 	width, height := meta.Size.Width, meta.Size.Height
-	
+
 	// Set resolution information
 	result.Metrics.Resolution = fmt.Sprintf("%dx%d", width, height)
 	result.Quality.IsLowResolution = width*height < 800000 || width < 800 || height < 1000
@@ -270,8 +287,8 @@ func (oca *coreAnalyzer) performEnhancedQualityChecks(img *loader.FastImage, res
 		result.Quality.HasDocumentEdges = oca.detectDocumentEdges(img)
 	}
 
-	// Perform quality validation using QualityValidator
-	oca.performQualityValidation(result, options)
+	// NOTE: We intentionally do NOT call performQualityValidation() here,
+	// because it is already called once at the end of the main analysis paths.
 }
 
 // performQualityValidation uses QualityValidator to generate quality error messages
@@ -332,10 +349,11 @@ func (oca *coreAnalyzer) finalizeAnalysisResults(result *AnalysisResult, options
 		result.Quality.Oversaturated ||
 		(options.OCRMode && (result.Quality.IsTooDark || result.Quality.IsTooBright))
 
-	// Also consider validation errors from QualityValidator
-	hasValidationErrors := len(result.Errors) > 0
+	// CHANGE 3: Validation errors should NOT auto-block unless image is already in a bad state (e.g., blurry).
+	// This prevents "clear enough" ambient/floor images from being rejected due to strict validator messaging.
+	hasValidationErrors := len(result.Errors) > 0 && result.Quality.Blurry
 
-	// Image is valid only if it has no quality issues AND no validation errors
+	// Image is valid only if it has no quality issues AND no blocking validation errors
 	result.Quality.IsValid = !hasQualityIssues && !hasValidationErrors
 }
 
@@ -354,15 +372,15 @@ func (oca *coreAnalyzer) detectDocumentEdges(img *loader.FastImage) bool {
 	if err != nil {
 		return false
 	}
-	
+
 	meta, err := grayImg.Metadata()
 	if err != nil {
 		return false
 	}
 	width, height := meta.Size.Width, meta.Size.Height
-	
+
 	buf := grayImg.Buffer()
-	
+
 	// Access pixel at (x, y) assuming stride=width
 	at := func(x, y int) uint8 {
 		if x < 0 || x >= width || y < 0 || y >= height {
@@ -373,9 +391,9 @@ func (oca *coreAnalyzer) detectDocumentEdges(img *loader.FastImage) bool {
 
 	// Simple heuristic: check if corners are significantly different from center
 	corners := []image.Point{
-		{10, 10}, // Top-left
-		{width - 10, 10}, // Top-right
-		{10, height - 10}, // Bottom-left
+		{10, 10},               // Top-left
+		{width - 10, 10},       // Top-right
+		{10, height - 10},      // Bottom-left
 		{width - 10, height - 10}, // Bottom-right
 	}
 
