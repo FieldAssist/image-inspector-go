@@ -105,36 +105,10 @@ type ImageQualityMetrics struct {
 	SkewAngle *float64
 }
 
-// isImageBlurry performs enhanced blur detection that considers image content
+// isImageBlurry performs blur detection based on Laplacian variance thresholds
 func (qv *QualityValidator) isImageBlurry(metrics ImageQualityMetrics) bool {
-
-	// For images with very low Laplacian variance, check if other quality indicators suggest the image is actually clear
-	if metrics.LaplacianVar <= qv.thresholds.MinLaplacianVariance {
-		// If variance is extremely low (< 1), it's likely truly blurry
-		if metrics.LaplacianVar < 1.0 {
-			return true
-		}
-
-		// For moderate low variance (10-350), check other quality indicators
-		// If luminance is reasonable and channels are balanced,
-		// the image might just have uniform content areas
-		isBalanced := qv.isChannelBalanced(metrics.ChannelBalance)
-		luminanceOK := metrics.AvgLuminance >= 0.3 && metrics.AvgLuminance <= 0.8
-
-		// Enhanced blur detection: Check if other quality indicators suggest the image is actually clear
-		if luminanceOK && isBalanced && !metrics.Overexposed && !metrics.Oversaturated {
-			// Image has good quality indicators despite low variance
-			// Likely uniform content (e.g., organized shelves, clean surfaces)
-			// Removed saturation requirement as uniform images naturally have lower saturation
-			return false
-		}
-
-		// Otherwise, consider it blurry
-		return true
-	}
-
-	// Normal variance range - not blurry
-	return false
+	// Simple threshold check as per user requirements
+	return metrics.LaplacianVar <= qv.thresholds.MinLaplacianVariance
 }
 
 // isChannelBalanced checks if RGB channels are reasonably balanced
@@ -148,55 +122,35 @@ func (qv *QualityValidator) isChannelBalanced(channels [3]float64) bool {
 func (qv *QualityValidator) ValidateBasicQuality(metrics ImageQualityMetrics) []QualityIssue {
 	var issues []QualityIssue
 
-	// 1. Blurriness (Laplacian Variance) - Enhanced detection
-	if qv.isImageBlurry(metrics) {
+	// 1. Sharpness (Laplacian Variance)
+	lowerThreshold := qv.thresholds.MinLaplacianVariance // 100.0
+	upperThreshold := qv.thresholds.MaxLaplacianVariance // 2000.0
+	blurMsg := "Blurred/Hazy/Unclear Picture. Take clear picture again."
+
+	if metrics.LaplacianVar <= lowerThreshold || metrics.LaplacianVar >= upperThreshold {
 		issues = append(issues, QualityIssue{
 			Type:        "blurriness",
-			Message:     "Image is blurry. Please hold the camera steady and try again.",
+			Message:     blurMsg,
 			Severity:    "error",
 			ActualValue: metrics.LaplacianVar,
-			Threshold:   qv.thresholds.MinLaplacianVariance,
-		})
-	} else if metrics.LaplacianVar >= qv.thresholds.MaxLaplacianVariance {
-		issues = append(issues, QualityIssue{
-			Type:        "over_sharpening",
-			Message:     "Image has too much noise or artificial sharpening. Use natural lighting and avoid digital zoom.",
-			Severity:    "error",
-			ActualValue: metrics.LaplacianVar,
-			Threshold:   qv.thresholds.MaxLaplacianVariance,
+			Threshold:   lowerThreshold,
 		})
 	}
 
-	// 2. Overexposure / Oversaturation
+	// 2. Overexposure
 	if metrics.Overexposed {
 		issues = append(issues, QualityIssue{
 			Type:     "overexposure",
-			Message:  "Image has too much light. Move to a less bright area.",
-			Severity: "error",
-		})
-	}
-	if metrics.Oversaturated {
-		issues = append(issues, QualityIssue{
-			Type:     "oversaturation",
-			Message:  "Colors are too strong. Use normal light while clicking.",
+			Message:  "Too much light in image. Take clear picture again.",
 			Severity: "error",
 		})
 	}
 
-	// 3. White Balance
-	if metrics.IncorrectWB {
-		issues = append(issues, QualityIssue{
-			Type:     "white_balance",
-			Message:  "Colors in the photo don't look natural. Use normal lighting.",
-			Severity: "warning",
-		})
-	}
-
-	// 4. Average Luminance
+	// 3. Average Luminance
 	if metrics.AvgLuminance <= qv.thresholds.MinLuminance {
 		issues = append(issues, QualityIssue{
 			Type:        "low_luminance",
-			Message:     "Image is very dull. Use more light.",
+			Message:     "Low light in the image, Take clear picture again.",
 			Severity:    "error",
 			ActualValue: metrics.AvgLuminance,
 			Threshold:   qv.thresholds.MinLuminance,
@@ -204,34 +158,10 @@ func (qv *QualityValidator) ValidateBasicQuality(metrics ImageQualityMetrics) []
 	} else if metrics.AvgLuminance >= qv.thresholds.MaxLuminance {
 		issues = append(issues, QualityIssue{
 			Type:        "high_luminance",
-			Message:     "Image is too bright. Take it in normal light.",
+			Message:     "Low light in the image,Capture the picture at a proper distance",
 			Severity:    "error",
 			ActualValue: metrics.AvgLuminance,
 			Threshold:   qv.thresholds.MaxLuminance,
-		})
-	}
-
-	// 5. Saturation
-	if metrics.AvgSaturation <= qv.thresholds.MinSaturation {
-		issues = append(issues, QualityIssue{
-			Type:        "low_saturation",
-			Message:     "Image looks faded. Use proper lighting.",
-			Severity:    "warning",
-			ActualValue: metrics.AvgSaturation,
-			Threshold:   qv.thresholds.MinSaturation,
-		})
-	}
-
-	// 6. Channel Balance
-	channels := metrics.ChannelBalance
-	if math.Abs(channels[0]-channels[1]) >= qv.thresholds.MaxChannelImbalance ||
-		math.Abs(channels[0]-channels[2]) >= qv.thresholds.MaxChannelImbalance ||
-		math.Abs(channels[1]-channels[2]) >= qv.thresholds.MaxChannelImbalance {
-		issues = append(issues, QualityIssue{
-			Type:      "channel_imbalance",
-			Message:   "Colors look odd. Don't use filters or colored lights.",
-			Severity:  "warning",
-			Threshold: qv.thresholds.MaxChannelImbalance,
 		})
 	}
 

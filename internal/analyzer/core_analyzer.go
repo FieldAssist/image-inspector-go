@@ -145,14 +145,11 @@ func (oca *coreAnalyzer) analyzeWithParallelProcessing(img *loader.FastImage, re
 	wg.Add(1)
 	oca.workerPool.Submit(func() {
 		defer wg.Done()
-		laplacianVar, err := oca.metricsCalculator.CalculateLaplacianVariance(img)
+		lapVar, err := oca.metricsCalculator.CalculateLaplacianVariance(img)
 		if err == nil {
-			// CHANGE 1: Make blur rejection "hard" (more lenient overall)
-			hard := options.BlurThreshold * 0.5
-
 			mu.Lock()
-			result.Metrics.LaplacianVar = laplacianVar
-			result.Quality.Blurry = laplacianVar <= hard
+			result.Metrics.LaplacianVar = lapVar
+			result.Quality.Blurry = lapVar <= 100.0 || lapVar >= 2000.0
 			mu.Unlock()
 		}
 	})
@@ -181,15 +178,9 @@ func (oca *coreAnalyzer) analyzeWithParallelProcessing(img *loader.FastImage, re
 
 	wg.Wait()
 
-	// CHANGE 2: Align parallel path with sequential checks (previously missing)
-	// Also: slightly relax exposure/saturation rejections (CHANGE 4)
-	result.Quality.Overexposed = result.Metrics.AvgLuminance > (options.OverexposureThreshold * 1.15)
-	result.Quality.Oversaturated = result.Metrics.AvgSaturation > (options.OversaturationThreshold * 1.15)
-
-	if !options.SkipWhiteBalance {
-		cb := result.Metrics.ChannelBalance
-		result.Quality.IncorrectWB = oca.hasWhiteBalanceIssue(cb[0], cb[1], cb[2])
-	}
+	// Quality flags alignment
+	result.Quality.Overexposed = result.Metrics.AvgLuminance >= 0.9
+	result.Quality.IsTooDark = result.Metrics.AvgLuminance <= 0.2
 
 	// Perform quality validation to populate error messages
 	oca.performQualityValidation(result, options)
@@ -219,22 +210,13 @@ func (oca *coreAnalyzer) analyzeSequentially(img *loader.FastImage, result *Anal
 	// Calculate Laplacian variance for blur detection
 	lapVar, err := oca.metricsCalculator.CalculateLaplacianVariance(img)
 	if err == nil {
-		// CHANGE 1: Make blur rejection "hard" (more lenient overall)
-		hard := options.BlurThreshold * 0.5
-
 		result.Metrics.LaplacianVar = lapVar
-		result.Quality.Blurry = result.Metrics.LaplacianVar <= hard
+		result.Quality.Blurry = lapVar <= 100.0 || lapVar >= 2000.0
 	}
 
-	// Check for overexposure and oversaturation
-	// CHANGE 4: slightly relax these comparisons
-	result.Quality.Overexposed = metrics.avgLuminance > (options.OverexposureThreshold * 1.15)
-	result.Quality.Oversaturated = metrics.avgSaturation > (options.OversaturationThreshold * 1.15)
-
-	// Check white balance (skip if disabled)
-	if !options.SkipWhiteBalance {
-		result.Quality.IncorrectWB = oca.hasWhiteBalanceIssue(metrics.avgR, metrics.avgG, metrics.avgB)
-	}
+	// Check for overexposure and darkness
+	result.Quality.Overexposed = metrics.avgLuminance >= 0.9
+	result.Quality.IsTooDark = metrics.avgLuminance <= 0.2
 
 	// Detect QR codes (skip if disabled)
 	if !options.SkipQRDetection {
@@ -343,18 +325,9 @@ func (oca *coreAnalyzer) getHeightFromResolution(resolution string) int {
 
 // finalizeAnalysisResults performs final processing and validation
 func (oca *coreAnalyzer) finalizeAnalysisResults(result *AnalysisResult, options AnalysisOptions) {
-	// Set overall validity based on quality checks and validation errors
-	hasQualityIssues := result.Quality.Blurry ||
-		result.Quality.Overexposed ||
-		result.Quality.Oversaturated ||
-		(options.OCRMode && (result.Quality.IsTooDark || result.Quality.IsTooBright))
-
-	// CHANGE 3: Validation errors should NOT auto-block unless image is already in a bad state (e.g., blurry).
-	// This prevents "clear enough" ambient/floor images from being rejected due to strict validator messaging.
-	hasValidationErrors := len(result.Errors) > 0 && result.Quality.Blurry
-
-	// Image is valid only if it has no quality issues AND no blocking validation errors
-	result.Quality.IsValid = !hasQualityIssues && !hasValidationErrors
+	// Image is valid only if it has no validation errors
+	// All critical quality issues now generate errors in result.Errors
+	result.Quality.IsValid = len(result.Errors) == 0
 }
 
 // hasWhiteBalanceIssue checks for white balance issues

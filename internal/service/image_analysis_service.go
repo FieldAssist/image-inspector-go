@@ -363,16 +363,13 @@ func (s *imageAnalysisService) calculateQualityScore(result *models.AnalysisResu
 	score := 100.0
 
 	if result.Quality.Blurry {
-		score -= 30.0
+		score -= 50.0
 	}
 	if result.Quality.Overexposed {
-		score -= 25.0
+		score -= 40.0
 	}
-	if result.Quality.Oversaturated {
-		score -= 20.0
-	}
-	if result.Quality.IncorrectWB {
-		score -= 15.0
+	if result.Quality.IsTooDark {
+		score -= 40.0
 	}
 
 	if score < 0 {
@@ -417,20 +414,8 @@ func (s *imageAnalysisService) calculateExposureScore(result *models.AnalysisRes
 }
 
 func (s *imageAnalysisService) calculateColorScore(result *models.AnalysisResult) float64 {
-	if result.Quality.Oversaturated {
-		return 40.0
-	}
-	if result.Quality.IncorrectWB {
-		return 50.0
-	}
-	// Good saturation range
-	if result.Metrics.AvgSaturation >= 0.2 && result.Metrics.AvgSaturation <= 0.8 {
-		return 100.0
-	} else if result.Metrics.AvgSaturation >= 0.1 && result.Metrics.AvgSaturation <= 0.9 {
-		return 80.0
-	} else {
-		return 60.0
-	}
+	// Only returning a base score since color checks are disabled
+	return 100.0
 }
 
 func (s *imageAnalysisService) calculateOCRReadiness(result *models.AnalysisResult) bool {
@@ -452,35 +437,42 @@ func (s *imageAnalysisService) hasCriticalIssues(result *models.AnalysisResult) 
 func (s *imageAnalysisService) generateQualityChecks(result *models.AnalysisResult) []models.QualityCheckResult {
 	checks := []models.QualityCheckResult{}
 
+	// Sharpness check
 	checks = append(checks, models.QualityCheckResult{
-		CheckName:      "Blur Detection",
+		CheckName:      "Sharpness Check",
 		Passed:         !result.Quality.Blurry,
 		ActualValue:    result.Metrics.LaplacianVar,
 		ThresholdValue: 100.0,
-		Message:        "Image sharpness assessment",
+		Message:        "Blurred/Hazy/Unclear Picture. Take clear picture again.",
 		Severity:       "error",
-		Confidence:     0.85,
+		Confidence:     0.95,
 	})
 
-	checks = append(checks, models.QualityCheckResult{
-		CheckName:      "Exposure Check",
-		Passed:         !result.Quality.Overexposed,
-		ActualValue:    result.Metrics.AvgLuminance,
-		ThresholdValue: 0.95,
-		Message:        "Image exposure assessment",
-		Severity:       "error",
-		Confidence:     0.90,
-	})
+	// Exposure check
+	if result.Quality.Overexposed {
+		checks = append(checks, models.QualityCheckResult{
+			CheckName:      "Overexposure Check",
+			Passed:         false,
+			ActualValue:    result.Metrics.AvgLuminance,
+			ThresholdValue: 0.9,
+			Message:        "Too much light in image. Take clear picture again.",
+			Severity:       "error",
+			Confidence:     0.95,
+		})
+	}
 
-	checks = append(checks, models.QualityCheckResult{
-		CheckName:      "Saturation Check",
-		Passed:         !result.Quality.Oversaturated,
-		ActualValue:    result.Metrics.AvgSaturation,
-		ThresholdValue: 0.9,
-		Message:        "Image saturation assessment",
-		Severity:       "warning",
-		Confidence:     0.80,
-	})
+	// Darkness check
+	if result.Quality.IsTooDark {
+		checks = append(checks, models.QualityCheckResult{
+			CheckName:      "Low Light Check",
+			Passed:         false,
+			ActualValue:    result.Metrics.AvgLuminance,
+			ThresholdValue: 0.2,
+			Message:        "Low light in the image, Take clear picture again.",
+			Severity:       "error",
+			Confidence:     0.95,
+		})
+	}
 
 	return checks
 }
